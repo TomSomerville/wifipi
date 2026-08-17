@@ -1,0 +1,6 @@
+# These scripts run on Linux. A CRLF checkout breaks them with
+# "bad interpreter: /usr/bin/env^M", so force LF everywhere regardless of
+# the platform doing the checkout.
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
