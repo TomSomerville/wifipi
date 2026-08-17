@@ -19,6 +19,9 @@ import sys
 import time
 
 ETH_P_ALL = 0x0003
+
+# Fixed for now: every node must sit on the same channel to hear each other.
+CHANNEL = 1
 TEST_BSSID = bytes.fromhex("02DEADBEEF01")
 TEST_MAGIC = b"WIFIPI-INJECT-TEST"
 
@@ -46,8 +49,8 @@ def run(*cmd, check=False):
 
 # ---------------------------------------------------------------- radiotap --
 
-def radiotap_tx(channel: int, rate_mbps: float = 1.0) -> bytes:
-    freq = 2484 if channel == 14 else 2407 + channel * 5
+def radiotap_tx(rate_mbps: float = 1.0) -> bytes:
+    freq = 2407 + CHANNEL * 5
     chan_flags = 0x0080 | (0x0020 if rate_mbps <= 11 else 0x0040)
     present = (1 << 2) | (1 << 3) | (1 << 15)
     return struct.pack(
@@ -105,7 +108,7 @@ def iface_type(ifname: str) -> str:
     return "unknown"
 
 
-def enable_monitor(ifname: str, channel: int) -> str:
+def enable_monitor(ifname: str) -> str:
     """Put the adapter into monitor mode. Returns the capture interface name.
 
     On a mac80211 driver monitor mode is just an interface type, and injection
@@ -137,11 +140,11 @@ def enable_monitor(ifname: str, channel: int) -> str:
     else:
         bad(f"{ifname} is type '{iface_type(ifname)}', not monitor")
 
-    r = run("iw", "dev", ifname, "set", "channel", str(channel))
+    r = run("iw", "dev", ifname, "set", "channel", str(CHANNEL))
     if r.returncode == 0:
-        ok(f"channel {channel} set")
+        ok(f"channel {CHANNEL} set")
     else:
-        warn(f"could not set channel {channel}: {r.stderr.strip()}")
+        warn(f"could not set channel {CHANNEL}: {r.stderr.strip()}")
 
     return ifname
 
@@ -179,6 +182,7 @@ def check_rx(sock: socket.socket, seconds: float = 5.0) -> bool:
     print(f"       listening {seconds:.0f}s for any 802.11 traffic...")
     end = time.time() + seconds
     frames = 0
+    raw = 0
     while time.time() < end:
         try:
             buf = sock.recv(4096)
@@ -187,17 +191,28 @@ def check_rx(sock: socket.socket, seconds: float = 5.0) -> bool:
         except OSError as e:
             bad(f"capture failed: {e}")
             return False
-        if buf and radiotap_len(buf) > 0:
+        if not buf:
+            continue
+        raw += 1
+        if radiotap_len(buf) > 0:
             frames += 1
     if frames:
         ok(f"monitor RX working ({frames} frames captured)")
         return True
-    bad("no frames captured -- monitor mode is not active")
+    if raw:
+        # Packets arrived but carried no radiotap header, so the capture path
+        # is alive and the framing is what is wrong.
+        bad(f"{raw} packets captured but none had a radiotap header")
+    else:
+        bad("no packets captured at all on this interface")
+        print("       monitor mode is set, so this is a receive-path problem:")
+        print("       * cross-check with:  sudo tcpdump -i <iface> -c 10")
+        print("       * confirm the channel took:  iw dev <iface> info")
     return False
 
 
-def check_inject(sock: socket.socket, mac: bytes, channel: int, count: int = 25) -> bool:
-    rt = radiotap_tx(channel)
+def check_inject(sock: socket.socket, mac: bytes, count: int = 25) -> bool:
+    rt = radiotap_tx()
     accepted = 0
     seen_own = 0
     print(f"       injecting {count} frames...")
@@ -254,8 +269,10 @@ def do_listen(sock: socket.socket, seconds: float) -> bool:
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("-i", "--iface", default="wlan0")
-    p.add_argument("-c", "--channel", type=int, default=1)
+    # Required, not defaulted: wlan0 is usually the Pi's onboard radio, which
+    # cannot inject. Guessing it wastes a run and looks like a driver failure.
+    p.add_argument("-i", "--iface", required=True,
+                   help="monitor-mode interface, e.g. wlan1")
     p.add_argument("-n", "--count", type=int, default=25)
     p.add_argument("--listen", action="store_true", help="peer mode: watch for test frames")
     p.add_argument("--seconds", type=float, default=30.0, help="listen duration")
@@ -272,7 +289,7 @@ def main() -> int:
     checks = []
 
     checks.append(("driver", check_mac80211(args.iface)))
-    cap = enable_monitor(args.iface, args.channel)
+    cap = enable_monitor(args.iface)
     print(f"       capture interface: {cap}")
 
     try:
@@ -288,7 +305,7 @@ def main() -> int:
 
     checks.append(("monitor rx", check_rx(sock)))
     mac = iface_mac(args.iface)
-    checks.append(("injection", check_inject(sock, mac, args.channel, args.count)))
+    checks.append(("injection", check_inject(sock, mac, args.count)))
     sock.close()
 
     print()

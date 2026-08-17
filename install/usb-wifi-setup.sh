@@ -2,7 +2,6 @@
 # Bring up a mac80211 USB WiFi adapter in monitor mode, ready for injection.
 #
 #   sudo ./usb-wifi-setup.sh -i wlan1            monitor mode on channel 1
-#   sudo ./usb-wifi-setup.sh -i wlan1 -c 6
 #   ./usb-wifi-setup.sh --status                 what is attached (no root)
 #
 # Targets the Netgear A9000 (MediaTek MT7925U), which needs kernel 6.18+.
@@ -11,6 +10,10 @@
 set -euo pipefail
 
 DRIVER=mt7925u
+
+# Fixed for now: every node must sit on the same channel to hear each other,
+# and channel hopping is a later problem.
+CHANNEL=1
 
 RED=$'\e[31m' GRN=$'\e[32m' YEL=$'\e[33m' RST=$'\e[0m'
 info() { printf '%s==>%s %s\n' "$GRN" "$RST" "$*"; }
@@ -23,13 +26,11 @@ usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; }
 indent() { sed 's/^/  /'; }
 
 IFACE=""
-CHANNEL=1
 STATUS_ONLY=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -i|--iface)   IFACE="$2"; shift 2 ;;
-        -c|--channel) CHANNEL="$2"; shift 2 ;;
         --status)     STATUS_ONLY=1; shift ;;
         -h|--help)    usage; exit 0 ;;
         *)            die "unknown option: $1" ;;
@@ -110,4 +111,4 @@ iw dev "$IFACE" info
 echo
 iw reg get | head -8   # regulatory domain caps TX power and forbids channels
 echo
-info "verify injection:  sudo python3 $(dirname "$0")/verify-injection.py -i $IFACE -c $CHANNEL"
+info "verify injection:  sudo python3 $(dirname "$0")/verify-injection.py -i $IFACE"

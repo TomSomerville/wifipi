@@ -41,17 +41,17 @@ On each node, find the adapter and bring it up:
 ```
 
 ```bash
-sudo ./install/usb-wifi-setup.sh -i wlan1 -c 1
+sudo ./install/usb-wifi-setup.sh -i wlan1
 ```
 
 Verify injection locally:
 
 ```bash
-sudo python3 install/verify-injection.py -i wlan1 -c 1
+sudo python3 install/verify-injection.py -i wlan1
 ```
 
 To prove frames reach the air, start the listener on the second node first:
 
 ```bash
-sudo python3 install/verify-injection.py -i wlan1 -c 1 --listen
+sudo python3 install/verify-injection.py -i wlan1 --listen
 ```

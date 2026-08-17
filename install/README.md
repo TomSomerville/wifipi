@@ -36,7 +36,7 @@ Find the adapter's interface name — no root needed:
 Then bring it up:
 
 ```bash
-sudo ./usb-wifi-setup.sh -i wlan1 -c 1
+sudo ./usb-wifi-setup.sh -i wlan1
 ```
 
 Checks the named interface is wireless, USB-attached (not the onboard SDIO
@@ -45,7 +45,7 @@ NetworkManager and wpa_supplicant from it, sets monitor mode and channel, then
 confirms the interface really is type `monitor`.
 
 ```bash
-sudo python3 ./verify-injection.py -i wlan1 -c 1
+sudo python3 ./verify-injection.py -i wlan1
 ```
 
 Checks the driver advertises monitor mode, captures ambient 802.11 traffic to
@@ -54,7 +54,7 @@ prove receive works, then injects 25 tagged frames.
 To prove frames actually reach the air you need both nodes. Listener first:
 
 ```bash
-sudo python3 ./verify-injection.py -i wlan1 -c 1 --listen
+sudo python3 ./verify-injection.py -i wlan1 --listen
 ```
 
 then send from the other Pi with the plain command above.
