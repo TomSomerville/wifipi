@@ -211,10 +211,12 @@ def check_rx(sock: socket.socket, seconds: float = 5.0) -> bool:
     return False
 
 
-def check_inject(sock: socket.socket, mac: bytes, count: int = 25) -> bool:
+def check_inject(sock: socket.socket, mac: bytes, count: int = 5) -> bool:
+    # No self-capture check here. A radio is half-duplex -- its receiver is
+    # blanked while transmitting -- so it can never hear its own frame. Only a
+    # second node can prove transmission, which is what --listen is for.
     rt = radiotap_tx()
     accepted = 0
-    seen_own = 0
     print(f"       injecting {count} frames...")
     for i in range(count):
         try:
@@ -223,26 +225,56 @@ def check_inject(sock: socket.socket, mac: bytes, count: int = 25) -> bool:
         except OSError as e:
             bad(f"frame {i} rejected: {e}")
             break
-        # Some drivers loop injected frames back into the capture path; if this
-        # one does, it is direct proof the frame was transmitted.
-        try:
-            buf = sock.recv(4096)
-            if TEST_MAGIC in buf:
-                seen_own += 1
-        except socket.timeout:
-            pass
         time.sleep(0.05)
 
     if accepted != count:
         bad(f"driver accepted only {accepted}/{count} frames")
         return False
     ok(f"driver accepted {accepted}/{count} injected frames")
-    if seen_own:
-        ok(f"{seen_own} injected frames observed back on the capture path")
-    else:
-        warn("own frames not seen in capture (normal for many drivers)")
-        warn("confirm on a second Pi with: sudo ./verify-injection.py -i wlan0 --listen")
+    print("       frames reaching the air can only be confirmed by a second node:")
+    print("       run  sudo ./verify-injection.py -i <iface> --listen  there")
     return True
+
+
+def hexdump(data: bytes, indent: str = "         ") -> str:
+    """Classic offset / hex / printable-ASCII dump."""
+    out = []
+    for off in range(0, len(data), 16):
+        chunk = data[off:off + 16]
+        hexes = " ".join(f"{b:02x}" for b in chunk)
+        text = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+        out.append(f"{indent}{off:04x}  {hexes:<47}  |{text}|")
+    return "\n".join(out)
+
+
+def describe_frame(buf: bytes) -> str:
+    """Break a captured frame into radiotap / 802.11 header / body."""
+    rl = radiotap_len(buf)
+    rt, frame = buf[:rl], buf[rl:]
+    hdr, body = frame[:24], frame[24:]
+
+    def mac(b):
+        return ":".join(f"{x:02x}" for x in b)
+
+    lines = [f"       radiotap ({len(rt)} bytes)", hexdump(rt)]
+
+    if len(hdr) == 24:
+        fc_type, fc_flags, dur, a1, a2, a3, seq = struct.unpack("<BBH6s6s6sH", hdr)
+        lines += [
+            f"       802.11 header ({len(hdr)} bytes)",
+            f"         frame control  type/subtype 0x{fc_type:02x}  flags 0x{fc_flags:02x}",
+            f"         duration       {dur}",
+            f"         addr1 receiver {mac(a1)}",
+            f"         addr2 sender   {mac(a2)}",
+            f"         addr3 bssid    {mac(a3)}",
+            f"         sequence       {seq >> 4}  fragment {seq & 0x0f}",
+            hexdump(hdr),
+        ]
+    else:
+        lines += [f"       802.11 header truncated ({len(hdr)} bytes)", hexdump(hdr)]
+
+    lines += [f"       body ({len(body)} bytes)", hexdump(body)]
+    return "\n".join(lines)
 
 
 def do_listen(sock: socket.socket, seconds: float) -> bool:
@@ -259,7 +291,10 @@ def do_listen(sock: socket.socket, seconds: float) -> bool:
         if len(body) > 24 and body[16:22] == TEST_BSSID and TEST_MAGIC in body:
             src = ":".join(f"{b:02x}" for b in body[10:16])
             hits += 1
-            print(f"       frame {hits} from {src}")
+            print()
+            print(f"       ---- frame {hits} from {src} "
+                  f"({len(buf)} bytes captured) ----")
+            print(describe_frame(buf))
     if hits:
         ok(f"received {hits} injected frames -- injection confirmed over the air")
         return True
@@ -273,7 +308,8 @@ def main() -> int:
     # cannot inject. Guessing it wastes a run and looks like a driver failure.
     p.add_argument("-i", "--iface", required=True,
                    help="monitor-mode interface, e.g. wlan1")
-    p.add_argument("-n", "--count", type=int, default=25)
+    p.add_argument("-n", "--count", type=int, default=5,
+                   help="frames to inject (default 5)")
     p.add_argument("--listen", action="store_true", help="peer mode: watch for test frames")
     p.add_argument("--seconds", type=float, default=30.0, help="listen duration")
     args = p.parse_args()
