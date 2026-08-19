@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""One-time node setup: generate this node's identity.
+
+    sudo ./bin/wifipi-setup
+
+The keypair is the only state a node must keep. Its public half determines the
+node's address, so losing the file means becoming a different node -- and
+regenerating on every boot would make the address meaningless. This script is
+therefore idempotent: if the key exists it prints the id and changes nothing.
+"""
+
+import argparse
+import os
+import stat
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from wifipi.identity import Identity   # noqa: E402
+
+# Absolute, not ~: under sudo, HOME resolves to /root on some distros and the
+# invoking user on others, which would silently give a node two identities
+# depending on how it was started.
+DEFAULT_KEY = "/var/lib/wifipi/node.key"
+
+
+def is_root():
+    # geteuid is absent on Windows; these tools are Linux-only, but
+    # keeping the check portable lets the logic be exercised anywhere.
+    return getattr(os, "geteuid", lambda: 0)() == 0
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--key", default=DEFAULT_KEY,
+                   help=f"identity file (default {DEFAULT_KEY})")
+    p.add_argument("--force", action="store_true",
+                   help="replace an existing identity (the node changes address)")
+    args = p.parse_args()
+
+    if os.path.exists(args.key) and not args.force:
+        ident = Identity.load(args.key)
+        print(f"identity already exists: {ident.node_id.hex()}")
+        print(f"  {args.key}")
+        print("nothing to do (--force to replace, which changes this node's address)")
+        return 0
+
+    if not is_root() and args.key == DEFAULT_KEY:
+        print(f"must run as root to write {DEFAULT_KEY}", file=sys.stderr)
+        return 1
+
+    os.makedirs(os.path.dirname(args.key), mode=0o700, exist_ok=True)
+
+    if args.force and os.path.exists(args.key):
+        old = Identity.load(args.key)
+        print(f"replacing identity {old.node_id.hex()}")
+
+    ident = Identity.generate()
+    ident.save(args.key)
+
+    mode = stat.S_IMODE(os.stat(args.key).st_mode)
+    print(f"generated identity {ident.node_id.hex()}")
+    print(f"  {args.key}  mode {mode:04o}")
+    if mode & 0o077:
+        print("  WARNING: private key is readable by others", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

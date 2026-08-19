@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""Verify an adapter, then monitor wifipi traffic.
+
+    sudo ./bin/wifipi-monitor -i wlan1
+
+Four checks, each failing loudly with the reason:
+
+    1. the interface is a USB wifi adapter, not the onboard SDIO radio
+    2. its driver advertises monitor mode
+    3. monitor mode actually engages on our channel
+    4. the driver accepts injected frames
+
+Then it stays in monitor mode and prints only our mesh traffic: frames whose
+802.11 BSSID is BEACHD and whose packet magic is BCHD. Everything else in the
+air is discarded.
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from wifipi.frame import (BadFrame, DEFAULT_HOP_LIMIT, Packet,   # noqa: E402
+                          TYPE_ANNOUNCE, _TYPE_NAMES)
+from wifipi.identity import BadAnnounce, parse_announce          # noqa: E402
+from wifipi.link import BSSID, CHANNEL, MonitorLink              # noqa: E402
+
+GRN, RED, YEL, DIM, RST = ("\033[32m", "\033[31m", "\033[33m",
+                           "\033[2m", "\033[0m")
+
+DRIVER_HINT = "mt7925u"
+
+
+def is_root():
+    # geteuid is absent on Windows; these tools are Linux-only, but
+    # keeping the check portable lets the logic be exercised anywhere.
+    return getattr(os, "geteuid", lambda: 0)() == 0
+
+
+def ok(m):
+    print(f"{GRN}[ok]{RST}   {m}")
+
+
+def bad(m):
+    print(f"{RED}[fail]{RST} {m}")
+
+
+def warn(m):
+    print(f"{YEL}[warn]{RST} {m}")
+
+
+def run(*cmd):
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def die(msg):
+    bad(msg)
+    sys.exit(1)
+
+
+def mac_str(b):
+    return ":".join(f"{x:02x}" for x in b)
+
+
+# ---------------------------------------------------------------- verify --
+
+def verify_hardware(iface):
+    """The interface is a USB wifi adapter, not the Pi's onboard radio."""
+    if not os.path.exists(f"/sys/class/net/{iface}"):
+        die(f"no such interface: {iface}\n"
+            f"       attached?  lsusb\n"
+            f"       driver?    dmesg | tail -40")
+    if not os.path.exists(f"/sys/class/net/{iface}/phy80211"):
+        die(f"{iface} is not a wireless interface")
+
+    dev = os.path.realpath(f"/sys/class/net/{iface}/device")
+    if "usb" not in dev:
+        die(f"{iface} is not USB-attached -- that looks like the onboard "
+            f"radio, whose MAC runs in firmware and cannot inject")
+
+    drv = os.path.basename(
+        os.path.realpath(f"/sys/class/net/{iface}/device/driver"))
+    ok(f"{iface}: {drv} over USB")
+    if drv != DRIVER_HINT:
+        warn(f"expected {DRIVER_HINT}; {drv} may still work if it is mac80211")
+    return drv
+
+
+def verify_monitor_supported(iface, drv):
+    """The driver advertises monitor mode among its interface types."""
+    r = run("iw", "phy")
+    if "monitor" not in r.stdout:
+        die(f"driver {drv} does not list monitor in its supported modes")
+    ok(f"driver {drv} advertises monitor mode")
+
+
+def iface_type(iface):
+    r = run("iw", "dev", iface, "info")
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("type "):
+            return line.split()[1]
+    return "unknown"
+
+
+def enter_monitor(iface):
+    """Engage monitor mode on our channel and leave it there."""
+    # NetworkManager and wpa_supplicant drag the interface back into managed
+    # mode if they are still watching it.
+    if run("sh", "-c", "command -v nmcli").returncode == 0:
+        run("nmcli", "device", "set", iface, "managed", "no")
+    run("pkill", "-f", f"wpa_supplicant.*{iface}")
+
+    if iface_type(iface) != "monitor":
+        run("ip", "link", "set", iface, "down")
+        # 'otherbss' asks for frames from every BSS, not just one.
+        r = run("iw", "dev", iface, "set", "monitor", "otherbss")
+        if r.returncode != 0:
+            r = run("iw", "dev", iface, "set", "type", "monitor")
+        if r.returncode != 0:
+            die(f"{iface} will not enter monitor mode: {r.stderr.strip()}")
+
+    run("ip", "link", "set", iface, "up")
+    if iface_type(iface) != "monitor":
+        die(f"{iface} is type '{iface_type(iface)}', not monitor")
+
+    r = run("iw", "dev", iface, "set", "channel", str(CHANNEL))
+    if r.returncode != 0:
+        warn(f"could not set channel {CHANNEL}: {r.stderr.strip()} "
+             f"(check your regulatory domain)")
+    ok(f"{iface} in monitor mode on channel {CHANNEL}")
+
+
+def verify_injection(link, count=5):
+    """The driver accepts injected frames.
+
+    Acceptance, not radiation: a half-duplex radio cannot hear its own
+    transmission. Another node receiving an announce is the real proof.
+    """
+    probe = Packet(src=b"\x00" * 16, payload=b"wifipi-injection-probe")
+    for i in range(count):
+        try:
+            link.send(probe.to_bytes())
+        except OSError as e:
+            die(f"driver rejected injected frame {i}: {e}")
+        time.sleep(0.02)
+    ok(f"driver accepted {count}/{count} injected frames")
+    print(f"{DIM}       acceptance, not radiation -- another node hearing an "
+          f"announce is the real proof{RST}")
+
+
+# --------------------------------------------------------------- monitor --
+
+def hexdump(data, indent="         "):
+    out = []
+    for off in range(0, len(data), 16):
+        chunk = data[off:off + 16]
+        hexes = " ".join(f"{b:02x}" for b in chunk)
+        text = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+        out.append(f"{indent}{off:04x}  {hexes:<47}  |{text}|")
+    return "\n".join(out)
+
+
+def monitor(link, show_hex):
+    print(f"\nmonitoring -- BSSID {mac_str(BSSID)} ({BSSID.decode()}), "
+          f"magic BCHD   (ctrl-c to stop)\n")
+    seen = {}
+    try:
+        while True:
+            got = link.recv()
+            if got is None:
+                continue
+            data, meta = got
+            try:
+                pkt = Packet.from_bytes(data)   # this checks the BCHD magic
+            except BadFrame:
+                continue
+
+            ts = time.strftime("%H:%M:%S")
+            rssi = meta.get("rssi")
+            sig = f"{rssi:>4} dBm" if rssi is not None else "   ? dBm"
+            rate = meta.get("rate_mbps")
+            rate_s = f"{rate:>5.1f} Mbps" if rate else "    ? Mbps"
+            kind = _TYPE_NAMES.get(pkt.type, f"0x{pkt.type:02x}")
+            hops = DEFAULT_HOP_LIMIT - pkt.hop_limit
+
+            if pkt.type != TYPE_ANNOUNCE:
+                print(f"[{ts}] {kind:<8} {pkt.src.hex()}  {sig} {rate_s}  "
+                      f"hops={hops}  {len(pkt.payload)}B")
+            else:
+                try:
+                    info = parse_announce(pkt.src, pkt.payload)
+                except BadAnnounce as e:
+                    print(f"[{ts}] {YEL}ANNOUNCE rejected{RST} from "
+                          f"{pkt.src.hex()}: {e}")
+                    continue
+                first = pkt.src not in seen
+                seen[pkt.src] = time.time()
+                tag = f"{GRN}NEW{RST}" if first else "   "
+                name = info["app_data"].decode(errors="replace") or "-"
+                print(f"[{ts}] ANNOUNCE {tag} {info['node_id'].hex()}  "
+                      f"{sig} {rate_s}  hops={hops}  name={name}")
+                print(f"{DIM}         verified: node_id matches its key, "
+                      f"signature valid{RST}")
+
+            if show_hex:
+                print(hexdump(data))
+            sys.stdout.flush()
+    except KeyboardInterrupt:
+        pass
+    print(f"\nheard {len(seen)} node(s)")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("-i", "--iface", required=True,
+                   help="monitor-mode interface, e.g. wlan1")
+    p.add_argument("--hexdump", action="store_true",
+                   help="dump raw packet bytes for each match")
+    p.add_argument("--no-verify", action="store_true",
+                   help="skip the checks and go straight to monitoring")
+    args = p.parse_args()
+
+    if not is_root():
+        print("must run as root (raw sockets, iw)", file=sys.stderr)
+        return 1
+
+    if not args.no_verify:
+        drv = verify_hardware(args.iface)
+        verify_monitor_supported(args.iface, drv)
+        enter_monitor(args.iface)
+
+    try:
+        link = MonitorLink(args.iface)
+    except OSError as e:
+        die(f"cannot open {args.iface}: {e}")
+
+    if not args.no_verify:
+        verify_injection(link)
+
+    monitor(link, args.hexdump)
+    link.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

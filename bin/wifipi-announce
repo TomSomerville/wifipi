@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Send an announce packet.
+
+    sudo ./bin/wifipi-announce -i wlan1 --name pi4
+    sudo ./bin/wifipi-announce -i wlan1 --once
+
+An announce advertises this node's address and public keys, signed. It is the
+one packet type sent in the clear: it carries the keys everything else is
+bootstrapped from, and contains nothing sensitive.
+
+Run wifipi-monitor on another node to see it arrive and verify.
+"""
+
+import argparse
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from wifipi.frame import Packet, TYPE_ANNOUNCE   # noqa: E402
+from wifipi.identity import Identity            # noqa: E402
+from wifipi.link import MonitorLink             # noqa: E402
+
+DEFAULT_KEY = "/var/lib/wifipi/node.key"
+
+
+def is_root():
+    # geteuid is absent on Windows; these tools are Linux-only, but
+    # keeping the check portable lets the logic be exercised anywhere.
+    return getattr(os, "geteuid", lambda: 0)() == 0
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("-i", "--iface", required=True,
+                   help="monitor-mode interface, e.g. wlan1")
+    p.add_argument("--key", default=DEFAULT_KEY)
+    p.add_argument("--interval", type=int, default=60,
+                   help="seconds between announces (default 60)")
+    p.add_argument("--name", default="", help="app data to advertise")
+    p.add_argument("--once", action="store_true", help="send one and exit")
+    args = p.parse_args()
+
+    if not is_root():
+        print("must run as root (raw sockets)", file=sys.stderr)
+        return 1
+    if not os.path.exists(args.key):
+        print(f"no identity at {args.key} -- run wifipi-setup first",
+              file=sys.stderr)
+        return 1
+
+    ident = Identity.load(args.key)
+    try:
+        link = MonitorLink(args.iface)
+    except OSError as e:
+        print(f"cannot open {args.iface}: {e}", file=sys.stderr)
+        return 1
+
+    what = "one announce" if args.once else f"an announce every {args.interval}s"
+    print(f"node {ident.node_id.hex()} sending {what} on {args.iface}")
+
+    n = 0
+    try:
+        while True:
+            pkt = Packet(src=ident.node_id, ptype=TYPE_ANNOUNCE,
+                         payload=ident.build_announce(args.name.encode()))
+            wire = pkt.to_bytes()
+            link.send(wire)
+            n += 1
+            print(f"[{time.strftime('%H:%M:%S')}] sent #{n}  "
+                  f"id={pkt.packet_id.hex()}  {len(wire)} bytes", flush=True)
+            if args.once:
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print()
+    link.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
