@@ -1,6 +1,6 @@
 """The radio: raw 802.11 frames in and out of a monitor-mode interface.
 
-Sends and receives wifipi packet bytes. Everything 802.11-specific lives here,
+Sends and receives beachedmesh packet bytes. Everything 802.11-specific lives here,
 so nothing above this layer needs to know about radiotap, MAC headers or FCS.
 
 A frame on the wire looks like:

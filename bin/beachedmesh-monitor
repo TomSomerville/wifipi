@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Verify an adapter, then monitor wifipi traffic.
+"""Verify an adapter, then monitor beachedmesh traffic.
 
-    sudo ./bin/wifipi-monitor -i wlan1
+    sudo ./bin/beachedmesh-monitor -i wlan1
 
 Four checks, each failing loudly with the reason:
 
@@ -23,10 +23,10 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from wifipi.frame import (BadFrame, DEFAULT_HOP_LIMIT, Packet,   # noqa: E402
+from beachedmesh.frame import (BadFrame, DEFAULT_HOP_LIMIT, Packet,   # noqa: E402
                           TYPE_ANNOUNCE, _TYPE_NAMES)
-from wifipi.identity import BadAnnounce, parse_announce          # noqa: E402
-from wifipi.link import BSSID, CHANNEL, MonitorLink              # noqa: E402
+from beachedmesh.identity import BadAnnounce, parse_announce          # noqa: E402
+from beachedmesh.link import BSSID, CHANNEL, MonitorLink              # noqa: E402
 
 GRN, RED, YEL, DIM, RST = ("\033[32m", "\033[31m", "\033[33m",
                            "\033[2m", "\033[0m")
@@ -140,7 +140,7 @@ def verify_injection(link, count=5):
     Acceptance, not radiation: a half-duplex radio cannot hear its own
     transmission. Another node receiving an announce is the real proof.
     """
-    probe = Packet(src=b"\x00" * 16, payload=b"wifipi-injection-probe")
+    probe = Packet(src=b"\x00" * 16, payload=b"beachedmesh-probe")
     for i in range(count):
         try:
             link.send(probe.to_bytes())

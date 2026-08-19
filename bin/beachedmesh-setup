@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One-time node setup: generate this node's identity.
 
-    sudo ./bin/wifipi-setup
+    sudo ./bin/beachedmesh-setup
 
 The keypair is the only state a node must keep. Its public half determines the
 node's address, so losing the file means becoming a different node -- and
@@ -16,12 +16,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from wifipi.identity import Identity   # noqa: E402
+from beachedmesh.identity import Identity   # noqa: E402
 
 # Absolute, not ~: under sudo, HOME resolves to /root on some distros and the
 # invoking user on others, which would silently give a node two identities
 # depending on how it was started.
-DEFAULT_KEY = "/var/lib/wifipi/node.key"
+DEFAULT_KEY = "/var/lib/beachedmesh/node.key"
 
 
 def is_root():

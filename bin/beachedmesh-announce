@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Send an announce packet.
 
-    sudo ./bin/wifipi-announce -i wlan1 --name pi4
-    sudo ./bin/wifipi-announce -i wlan1 --once
+    sudo ./bin/beachedmesh-announce -i wlan1 --name pi4
+    sudo ./bin/beachedmesh-announce -i wlan1 --once
 
 An announce advertises this node's address and public keys, signed. It is the
 one packet type sent in the clear: it carries the keys everything else is
 bootstrapped from, and contains nothing sensitive.
 
-Run wifipi-monitor on another node to see it arrive and verify.
+Run beachedmesh-monitor on another node to see it arrive and verify.
 """
 
 import argparse
@@ -18,11 +18,11 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from wifipi.frame import Packet, TYPE_ANNOUNCE   # noqa: E402
-from wifipi.identity import Identity            # noqa: E402
-from wifipi.link import MonitorLink             # noqa: E402
+from beachedmesh.frame import Packet, TYPE_ANNOUNCE   # noqa: E402
+from beachedmesh.identity import Identity            # noqa: E402
+from beachedmesh.link import MonitorLink             # noqa: E402
 
-DEFAULT_KEY = "/var/lib/wifipi/node.key"
+DEFAULT_KEY = "/var/lib/beachedmesh/node.key"
 
 
 def is_root():
@@ -46,7 +46,7 @@ def main():
         print("must run as root (raw sockets)", file=sys.stderr)
         return 1
     if not os.path.exists(args.key):
-        print(f"no identity at {args.key} -- run wifipi-setup first",
+        print(f"no identity at {args.key} -- run beachedmesh-setup first",
               file=sys.stderr)
         return 1
 

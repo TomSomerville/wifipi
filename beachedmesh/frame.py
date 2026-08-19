@@ -1,4 +1,4 @@
-"""The wifipi packet header.
+"""The beachedmesh packet header.
 
 A packet is the end-to-end unit: it is copied unchanged from hop to hop, except
 hop_limit which each relay decrements. The 802.11 frame around it is rebuilt by

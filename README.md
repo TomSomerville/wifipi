@@ -1,4 +1,4 @@
-# wifipi
+# beachedmesh
 
 An association-free mesh network over 802.11. Nodes never join an access
 point, never associate, and never touch the kernel networking stack — each
@@ -16,13 +16,13 @@ and verifies the signature. Routing is not written yet.
 ## What is here
 
 ```
-bin/wifipi-setup      one-time: generate this node's identity
-bin/wifipi-monitor    verify the adapter, then monitor our traffic
-bin/wifipi-announce   broadcast an announce
+bin/beachedmesh-setup      one-time: generate this node's identity
+bin/beachedmesh-monitor    verify the adapter, then monitor our traffic
+bin/beachedmesh-announce   broadcast an announce
 
-wifipi/frame.py       the packet header: build and parse
-wifipi/identity.py    keys, node_id, announce signing and verification
-wifipi/link.py        radiotap, 802.11 framing, raw socket
+beachedmesh/frame.py       the packet header: build and parse
+beachedmesh/identity.py    keys, node_id, announce signing and verification
+beachedmesh/link.py        radiotap, 802.11 framing, raw socket
 ```
 
 ## Hardware
@@ -47,7 +47,7 @@ pip3 install -r requirements.txt
 Generate this node's identity, once ever:
 
 ```bash
-sudo ./bin/wifipi-setup
+sudo ./bin/beachedmesh-setup
 ```
 
 It prints the `node_id` and does nothing if one already exists — a reboot or a
@@ -56,7 +56,7 @@ re-run must never produce a second identity.
 On the listening node, verify the adapter and stay in monitor mode:
 
 ```bash
-sudo ./bin/wifipi-monitor -i wlan1
+sudo ./bin/beachedmesh-monitor -i wlan1
 ```
 
 It checks the interface is a USB adapter rather than the onboard radio, that
@@ -68,7 +68,7 @@ frames whose BSSID is `42:45:41:43:48:44` ("BEACHD") and whose packet magic is
 On another node, send an announce:
 
 ```bash
-sudo ./bin/wifipi-announce -i wlan1 --name pi4 --once
+sudo ./bin/beachedmesh-announce -i wlan1 --name pi4 --once
 ```
 
 The monitor should print the announce with a matching node_id, `verified`, the
