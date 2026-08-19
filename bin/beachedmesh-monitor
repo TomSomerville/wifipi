@@ -174,11 +174,12 @@ def _section(title, size, note=""):
 def print_frame(pkt, data, meta):
     """The whole frame, split the way it sits on the wire.
 
-    Frame header and footer belong to 802.11 and are rebuilt at every hop.
-    The packet header and body are ours and travel end to end unchanged.
+    The frame header belongs to 802.11 and is rebuilt at every hop; the
+    packet header and body are ours and travel end to end unchanged. The FCS
+    is not shown -- mt7925u strips it before we see the frame, having already
+    checked it in hardware.
     """
     dot11 = meta.get("dot11", b"")
-    fcs = meta.get("fcs", b"")
     header, body = data[:HEADER_LEN], data[HEADER_LEN:]
 
     # ---- frame header (802.11) ----
@@ -219,13 +220,6 @@ def print_frame(pkt, data, meta):
             print(f"      app data       {body[ANNOUNCE_MIN:]!r}")
     print(hexdump(body, "      "))
 
-    # ---- frame footer ----
-    if fcs:
-        print(_section("FRAME FOOTER  FCS", len(fcs), "checked in hardware"))
-        print(hexdump(fcs, "      "))
-    else:
-        print(f"{DIM}--- FRAME FOOTER  FCS (0 bytes)  "
-              f"stripped by the driver before we saw it ---{RST}")
     print()
 
 def monitor(link, brief):
