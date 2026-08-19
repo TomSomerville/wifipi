@@ -27,8 +27,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from beachedmesh.frame import (BadFrame, DEFAULT_HOP_LIMIT, HEADER_LEN,  # noqa: E402
                                Packet, TYPE_ANNOUNCE, _TYPE_NAMES)
 from beachedmesh.identity import (ANNOUNCE_MIN, BadAnnounce,          # noqa: E402
-                                  parse_announce)
+                                  Identity, parse_announce)
 from beachedmesh.link import BSSID, CHANNEL, MonitorLink              # noqa: E402
+from beachedmesh.routes import RouteTable                             # noqa: E402
 
 GRN, RED, YEL, DIM, RST = ("\033[32m", "\033[31m", "\033[33m",
                            "\033[2m", "\033[0m")
@@ -222,13 +223,24 @@ def print_frame(pkt, data, meta):
 
     print()
 
-def monitor(link, brief):
+def monitor(link, brief, own_id=None):
     print(f"\nmonitoring -- BSSID {mac_str(BSSID)} ({BSSID.decode()}), "
           f"magic BCHD   (ctrl-c to stop)\n")
     seen = {}
+    routes = RouteTable(own_id=own_id)
+    last_expire = time.time()
     try:
         while True:
             got = link.recv()
+
+            # Drop nodes we have stopped hearing from. Doing it on a timer
+            # rather than on receive means a silent mesh still ages out.
+            if time.time() - last_expire > 30:
+                for dead in routes.expire():
+                    print(f"[{time.strftime('%H:%M:%S')}] {YEL}EXPIRED{RST} "
+                          f"{dead.hex()} -- no announce in {routes.ttl:.0f}s")
+                last_expire = time.time()
+
             if got is None:
                 continue
             data, meta = got
@@ -255,14 +267,25 @@ def monitor(link, brief):
                     print(f"[{ts}] {YEL}ANNOUNCE rejected{RST} from "
                           f"{pkt.src.hex()}: {e}")
                     continue
-                first = pkt.src not in seen
                 seen[pkt.src] = time.time()
-                tag = f"{GRN}NEW{RST}" if first else "   "
-                name = info["app_data"].decode(errors="replace") or "-"
-                print(f"[{ts}] ANNOUNCE {tag} {info['node_id'].hex()}  "
-                      f"{sig} {rate_s}  hops={hops}  name={name}")
+                name = info["app_data"].decode(errors="replace")
+                # addr2 is the radio that handed us this frame, so it is the
+                # next hop toward whoever originated the announce.
+                what = routes.learn(
+                    pkt.src, meta["src_mac"], hops, rssi,
+                    sign_pub=info["sign_pub"], encrypt_pub=info["encrypt_pub"],
+                    name=name)
+                tag = {"new": f"{GRN}NEW{RST}", "better": f"{GRN}BETTER{RST}",
+                       "self": f"{DIM}SELF{RST}"}.get(what, "      ")
+                print(f"[{ts}] ANNOUNCE {tag:<6} {info['node_id'].hex()}  "
+                      f"{sig} {rate_s}  hops={hops}  name={name or '-'}")
                 print(f"{DIM}         verified: node_id matches its key, "
-                      f"signature valid{RST}")
+                      f"signature valid   route: {what}{RST}")
+                if what in ("new", "better"):
+                    print()
+                    print(f"{DIM}=== ROUTE TABLE ==={RST}")
+                    print(routes.render())
+                    print()
 
             if not brief:
                 print_frame(pkt, data, meta)
@@ -276,6 +299,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("-i", "--iface", required=True,
                    help="monitor-mode interface, e.g. wlan1")
+    p.add_argument("--key", default="/var/lib/beachedmesh/node.key",
+                   help="identity file, used only to recognise our own "
+                        "announces relayed back to us")
     p.add_argument("--brief", action="store_true",
                    help="one line per packet instead of the full frame")
     p.add_argument("--no-verify", action="store_true",
@@ -299,7 +325,17 @@ def main():
     if not args.no_verify:
         verify_injection(link)
 
-    monitor(link, args.brief)
+    # Knowing our own id lets the route table ignore our announces when a
+    # neighbour relays them back. Not required to monitor, so a missing key
+    # is only worth a note.
+    own_id = None
+    if os.path.exists(args.key):
+        own_id = Identity.load(args.key).node_id
+        print(f"this node: {own_id.hex()}")
+    else:
+        warn(f"no identity at {args.key} -- cannot filter our own announces")
+
+    monitor(link, args.brief, own_id)
     link.close()
     return 0
 
