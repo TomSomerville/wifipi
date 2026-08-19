@@ -138,14 +138,25 @@ class MonitorLink:
         except ValueError:
             return None
 
-        if meta.get("flags", 0) & F_FCS_AT_END:
-            frame = frame[:-4]
+        # Keep every layer. Nothing above needs radiotap to route a packet,
+        # but a troubleshooting tool has to be able to show the whole frame.
+        meta["raw"] = buf
+        meta["radiotap"] = buf[:len(buf) - len(frame)]
+
+        # The driver may or may not hand up the trailing checksum; radiotap
+        # FLAGS bit 0x10 says which. Keep it rather than discard it, so
+        # callers can show the whole frame.
+        fcs = b""
+        if meta.get("flags", 0) & F_FCS_AT_END and len(frame) >= 4:
+            frame, fcs = frame[:-4], frame[-4:]
         if len(frame) <= DOT11_HDR_LEN:
             return None
         if frame[0] != FC_DATA or frame[16:22] != BSSID:
             return None      # not ours -- the overwhelming majority
 
         meta["src_mac"] = frame[10:16]
+        meta["dot11"] = frame[:DOT11_HDR_LEN]
+        meta["fcs"] = fcs
         return frame[DOT11_HDR_LEN:], meta
 
     def fileno(self):

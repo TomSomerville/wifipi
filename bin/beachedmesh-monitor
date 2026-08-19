@@ -17,15 +17,17 @@ air is discarded.
 
 import argparse
 import os
+import struct
 import subprocess
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from beachedmesh.frame import (BadFrame, DEFAULT_HOP_LIMIT, Packet,   # noqa: E402
-                          TYPE_ANNOUNCE, _TYPE_NAMES)
-from beachedmesh.identity import BadAnnounce, parse_announce          # noqa: E402
+from beachedmesh.frame import (BadFrame, DEFAULT_HOP_LIMIT, HEADER_LEN,  # noqa: E402
+                               Packet, TYPE_ANNOUNCE, _TYPE_NAMES)
+from beachedmesh.identity import (ANNOUNCE_MIN, BadAnnounce,          # noqa: E402
+                                  parse_announce)
 from beachedmesh.link import BSSID, CHANNEL, MonitorLink              # noqa: E402
 
 GRN, RED, YEL, DIM, RST = ("\033[32m", "\033[31m", "\033[33m",
@@ -154,7 +156,7 @@ def verify_injection(link, count=5):
 
 # --------------------------------------------------------------- monitor --
 
-def hexdump(data, indent="         "):
+def hexdump(data, indent="    "):
     out = []
     for off in range(0, len(data), 16):
         chunk = data[off:off + 16]
@@ -164,7 +166,69 @@ def hexdump(data, indent="         "):
     return "\n".join(out)
 
 
-def monitor(link, show_hex):
+def _section(title, size, note=""):
+    tail = f"  {note}" if note else ""
+    return f"{DIM}--- {title} ({size} bytes){tail} ---{RST}"
+
+
+def print_frame(pkt, data, meta):
+    """The whole frame, split the way it sits on the wire.
+
+    Frame header and footer belong to 802.11 and are rebuilt at every hop.
+    The packet header and body are ours and travel end to end unchanged.
+    """
+    dot11 = meta.get("dot11", b"")
+    fcs = meta.get("fcs", b"")
+    header, body = data[:HEADER_LEN], data[HEADER_LEN:]
+
+    # ---- frame header (802.11) ----
+    print(_section("FRAME HEADER  802.11 MAC", len(dot11), "rebuilt every hop"))
+    if len(dot11) == 24:
+        fc_type, fc_flags, dur, a1, a2, a3, seq = struct.unpack("<BBH6s6s6sH", dot11)
+        print(f"      frame control  0x{fc_type:02x} 0x{fc_flags:02x}"
+              f"   (type/subtype, flags)")
+        print(f"      duration       {dur}")
+        print(f"      addr1 receiver {mac_str(a1)}")
+        print(f"      addr2 sender   {mac_str(a2)}")
+        print(f"      addr3 bssid    {mac_str(a3)}  ({a3.decode(errors='replace')})")
+        print(f"      sequence       {seq >> 4}   fragment {seq & 0x0f}")
+    print(hexdump(dot11, "      "))
+
+    # ---- packet header (ours) ----
+    print(_section("PACKET HEADER  beachedmesh", len(header), "end to end"))
+    print(f"      magic          {header[0:4].decode(errors='replace')}")
+    print(f"      version        {header[4]}")
+    print(f"      type           0x{pkt.type:02x}  "
+          f"{_TYPE_NAMES.get(pkt.type, 'unknown')}")
+    print(f"      flags          0x{pkt.flags:02x}  {pkt.flags:08b}")
+    print(f"      hop_limit      {pkt.hop_limit}")
+    print(f"      packet_id      {pkt.packet_id.hex()}")
+    print(f"      src            {pkt.src.hex()}")
+    print(f"      dst            {pkt.dst.hex()}"
+          f"{'  (broadcast)' if pkt.is_broadcast else ''}")
+    print(hexdump(header, "      "))
+
+    # ---- packet body ----
+    print(_section("PACKET BODY", len(body)))
+    if pkt.type == TYPE_ANNOUNCE and len(body) >= ANNOUNCE_MIN:
+        print(f"      ed25519 pub    {body[0:32].hex()}")
+        print(f"      x25519 pub     {body[32:64].hex()}")
+        print(f"      random         {body[64:74].hex()}")
+        print(f"      signature      {body[74:138].hex()}")
+        if len(body) > ANNOUNCE_MIN:
+            print(f"      app data       {body[ANNOUNCE_MIN:]!r}")
+    print(hexdump(body, "      "))
+
+    # ---- frame footer ----
+    if fcs:
+        print(_section("FRAME FOOTER  FCS", len(fcs), "checked in hardware"))
+        print(hexdump(fcs, "      "))
+    else:
+        print(f"{DIM}--- FRAME FOOTER  FCS (0 bytes)  "
+              f"stripped by the driver before we saw it ---{RST}")
+    print()
+
+def monitor(link, brief):
     print(f"\nmonitoring -- BSSID {mac_str(BSSID)} ({BSSID.decode()}), "
           f"magic BCHD   (ctrl-c to stop)\n")
     seen = {}
@@ -206,8 +270,8 @@ def monitor(link, show_hex):
                 print(f"{DIM}         verified: node_id matches its key, "
                       f"signature valid{RST}")
 
-            if show_hex:
-                print(hexdump(data))
+            if not brief:
+                print_frame(pkt, data, meta)
             sys.stdout.flush()
     except KeyboardInterrupt:
         pass
@@ -218,8 +282,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("-i", "--iface", required=True,
                    help="monitor-mode interface, e.g. wlan1")
-    p.add_argument("--hexdump", action="store_true",
-                   help="dump raw packet bytes for each match")
+    p.add_argument("--brief", action="store_true",
+                   help="one line per packet instead of the full frame")
     p.add_argument("--no-verify", action="store_true",
                    help="skip the checks and go straight to monitoring")
     args = p.parse_args()
@@ -241,7 +305,7 @@ def main():
     if not args.no_verify:
         verify_injection(link)
 
-    monitor(link, args.hexdump)
+    monitor(link, args.brief)
     link.close()
     return 0
 
