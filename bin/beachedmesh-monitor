@@ -228,6 +228,9 @@ def monitor(link, brief, own_id=None):
           f"magic BCHD   (ctrl-c to stop)\n")
     seen = {}
     routes = RouteTable(own_id=own_id)
+    warmed = routes.warm()
+    if warmed:
+        print(f"warmed {warmed:,} routes from disk")
     last_expire = time.time()
     try:
         while True:
@@ -235,6 +238,8 @@ def monitor(link, brief, own_id=None):
 
             # Drop nodes we have stopped hearing from. Doing it on a timer
             # rather than on receive means a silent mesh still ages out.
+            routes.tick()          # flush buffered writes when due
+
             if time.time() - last_expire > 30:
                 for dead in routes.expire():
                     print(f"[{time.strftime('%H:%M:%S')}] {YEL}EXPIRED{RST} "
@@ -287,6 +292,7 @@ def monitor(link, brief, own_id=None):
                     print()
                     print(f"{DIM}=== ROUTE TABLE ==={RST}")
                     print(routes.render())
+                    print(f"{DIM}         {routes.summary()}{RST}")
                     print()
 
             if not brief:
