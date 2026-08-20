@@ -65,17 +65,24 @@ offset  size  field
   0      4    magic       "BCHD"
   4      1    version     start at 1
   5      1    type        0x01 DATA, 0x02 ANNOUNCE, 0x03 ACK
-  6      1    flags       bit0 ENCRYPTED, bit1 WANT_ACK
-  7      1    hop_limit   decremented per relay; 0 = do not relay
-  8      4    packet_id   random at origin, copied by relays
- 12     16    src         originating node_id
- 28     16    dst         node_id, or ff*16 for broadcast
+  6      1    flags       bit0 WANT_ACK
+  7      2    hop_limit   decremented per relay; 0 = do not relay
+  9      4    packet_id   random at origin, copied by relays
+ 13     16    src         originating node_id
+ 29     16    dst         node_id, or ff*16 for broadcast
 ────────────
- 44 bytes + payload
+ 45 bytes + payload
 ```
 
 `type` is an enum because the values are mutually exclusive; `flags` is a
 bitfield because its properties combine.
+
+**hop_limit is two bytes.** One caps the mesh at 255 relays, roughly 1,000 km
+at realistic hop distances -- a hard ceiling on the diameter of a network
+meant to span continents without touching the internet. Two bytes reach 65,535
+hops, which circles the Earth even at 1 km per hop. A third would buy nothing:
+at ~20 ms per hop, a thousand hops is already 20 seconds one way, so latency
+makes any path the field cannot express unusable anyway.
 
 **hop_limit is mutated in flight**, so it cannot be covered by a signature or
 AEAD tag -- the first relay would invalidate it. Authentication must span the
@@ -90,8 +97,8 @@ the payload), no checksum (802.11 FCS covers it in hardware), no previous-hop
 address (802.11 addr2 gives it free), no sequence number (packet_id covers
 dedup).
 
-Cost on air: 24 (802.11) + 44 (ours) + 4 (FCS) = 72 bytes before payload,
-about 576 us at 1 Mbps. Most of it is the 32 bytes of addressing.
+Cost on air: 24 (802.11) + 45 (ours) + 4 (FCS) = 73 bytes before payload,
+about 584 us at 1 Mbps. Most of it is the 32 bytes of addressing.
 
 ## Deferred work
 

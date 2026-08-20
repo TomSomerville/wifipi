@@ -14,12 +14,18 @@ the public keys everything else is bootstrapped from.
       4      1    version
       5      1    type        DATA | ANNOUNCE | ACK
       6      1    flags       WANT_ACK
-      7      1    hop_limit   decremented per relay; 0 = do not relay
-      8      4    packet_id   random at origin, copied by relays
-     12     16    src         originating node_id
-     28     16    dst         node_id, or BROADCAST
+      7      2    hop_limit   decremented per relay; 0 = do not relay
+      9      4    packet_id   random at origin, copied by relays
+     13     16    src         originating node_id
+     29     16    dst         node_id, or BROADCAST
     ────────────
-     44 bytes + payload
+     45 bytes + payload
+
+hop_limit is two bytes because one caps the mesh at 255 relays -- around
+1,000 km at realistic hop distances, which a network meant to span continents
+without touching the internet would hit. 65,535 hops circles the Earth even at
+1 km per hop, and latency makes anything past a few thousand unusable, so a
+third byte would buy nothing.
 """
 
 import os
@@ -28,8 +34,8 @@ import struct
 MAGIC = b"BCHD"
 VERSION = 1
 
-HEADER_FMT = "!4sBBBBI16s16s"
-HEADER_LEN = struct.calcsize(HEADER_FMT)   # 44
+HEADER_FMT = "!4sBBBHI16s16s"
+HEADER_LEN = struct.calcsize(HEADER_FMT)   # 45
 
 ID_LEN = 16
 BROADCAST = b"\xff" * ID_LEN
@@ -49,6 +55,7 @@ FLAG_NO_ACK = 0x00      # 0000 0000 -- no bits set; fire and forget
 FLAG_WANT_ACK = 0x01    # 0000 0001
 
 DEFAULT_HOP_LIMIT = 3
+MAX_HOP_LIMIT = 0xFFFF
 
 
 class BadFrame(Exception):

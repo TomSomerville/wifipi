@@ -255,7 +255,9 @@ def monitor(link, brief, own_id=None):
             rate = meta.get("rate_mbps")
             rate_s = f"{rate:>5.1f} Mbps" if rate else "    ? Mbps"
             kind = _TYPE_NAMES.get(pkt.type, f"0x{pkt.type:02x}")
-            hops = DEFAULT_HOP_LIMIT - pkt.hop_limit
+            # Clamped: a sender using a different initial hop_limit would
+            # otherwise produce a negative count.
+            hops = max(0, DEFAULT_HOP_LIMIT - pkt.hop_limit)
 
             if pkt.type != TYPE_ANNOUNCE:
                 print(f"[{ts}] {kind:<8} {pkt.src.hex()}  {sig} {rate_s}  "
