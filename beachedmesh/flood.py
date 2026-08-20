@@ -30,30 +30,40 @@ from collections import OrderedDict
 # recommendation from the broadcast-storm literature.
 RELAY_THRESHOLD = 3
 
-# Window a relay waits in before transmitting. Long enough that other nodes'
-# relays arrive and can cancel ours -- at 1 Mbps an announce is ~2 ms on air,
-# so tens of milliseconds is ample.
-CW_MIN = 0.020
-CW_MAX = 0.200
+# Relay delay by received signal. A node that heard the sender weakly is
+# probably far away, so it waits least and relays first, covering the ground
+# the original did not reach. Nodes that heard it strongly wait longest and
+# usually end up cancelling.
+#
+# (rssi_at_or_above, base_ms, jitter_ms) -- first match wins, weakest first.
+#
+# The jitter is not decoration. Without it every node in a band picks the same
+# delay and they transmit simultaneously: the collision means nobody receives
+# the relay, so nobody's counter increments, so nobody cancels -- suppression
+# defeats itself precisely when density makes it matter. Jitter stays inside
+# each band so the far-first ordering holds.
+DELAY_BANDS = [
+    (-95,  10,  5),    # weakest: relay almost immediately
+    (-80,  20, 15),
+    (-70,  50, 20),
+    (-60,  90, 17),
+    (-50, 125, 30),
+    (None, 200, 30),   # strongest: wait longest, expect to cancel
+]
 
-# Signal range mapped onto that window. A node that heard the sender weakly is
-# probably far away, so it waits less and relays first, covering the most
-# ground the original did not reach. Nodes that heard it strongly wait longer
-# and usually end up cancelling.
-RSSI_WEAK = -95.0
-RSSI_STRONG = -50.0
+# Used when the driver gave us no signal reading at all.
+CW_MIN = 0.010
+CW_MAX = 0.230
 
 
 def relay_delay(rssi=None):
-    """Weak signal -> short delay -> distant nodes relay first."""
+    """Seconds to wait before relaying. Weak signal -> short delay."""
     if rssi is None:
         return random.uniform(CW_MIN, CW_MAX)
-    span = RSSI_STRONG - RSSI_WEAK
-    frac = (max(RSSI_WEAK, min(RSSI_STRONG, float(rssi))) - RSSI_WEAK) / span
-    base = CW_MIN + frac * (CW_MAX - CW_MIN)
-    # Jitter so two nodes at the same distance do not collide every time.
-    jitter = (CW_MAX - CW_MIN) * 0.1
-    return max(0.0, base + random.uniform(-jitter, jitter))
+    for threshold, base_ms, jitter_ms in DELAY_BANDS:
+        if threshold is None or rssi <= threshold:
+            return (base_ms + random.uniform(0, jitter_ms)) / 1000.0
+    return CW_MAX
 
 
 class SeenCache:
