@@ -25,19 +25,21 @@ import os
 import tempfile
 import time
 
-# A node that has not been heard from in this long is assumed gone. Wants to be
-# a few announce intervals: long enough to survive a couple of lost announces,
-# short enough that a departed node does not linger as a black hole.
-DEFAULT_TTL = 300.0
+# How long a node is remembered at all. A week, matching what survives a
+# restart, so the table's memory is the same whether or not it was reloaded.
+# Forgetting a node means losing its keys too, which costs an announce to
+# relearn -- worth avoiding for anything that might come back.
+DEFAULT_TTL = 7 * 24 * 3600.0
 
-# Below this age an entry is trusted enough that a longer path will not
-# displace it. Past it, any working route is better than a stale short one.
-STALE_AFTER = DEFAULT_TTL / 2
+# How long a *path* is trusted, which is a much shorter question than how long
+# a *node* is remembered. Past this, any working route displaces the one we
+# hold: a short path through a neighbour that stopped answering is worse than
+# a longer one that works. Wants to be a few announce intervals -- long enough
+# to ride out a couple of lost announces, short enough to reroute quickly.
+STALE_AFTER = 300.0
 
-# Entries older than this are dropped when the table is loaded from disk. A
-# node not heard from in a week is not coming back in any sense that matters,
-# and keeping it only wastes space and clutters the view.
-MAX_AGE_ON_LOAD = 7 * 24 * 3600.0
+# Entries older than this are dropped when the table is loaded from disk.
+MAX_AGE_ON_LOAD = DEFAULT_TTL
 
 DEFAULT_PATH = "/var/lib/beachedmesh/routes.json"
 
