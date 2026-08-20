@@ -25,18 +25,29 @@ import os
 import tempfile
 import time
 
-# How long a node is remembered at all. A week, matching what survives a
-# restart, so the table's memory is the same whether or not it was reloaded.
-# Forgetting a node means losing its keys too, which costs an announce to
-# relearn -- worth avoiding for anything that might come back.
+# The announce interval everything else is sized against. Long, deliberately:
+# announce traffic is the standing cost of a mesh, paid by every node forever,
+# and flooding means each one is repeated by every node in range. Shorten it
+# only for testing.
+ANNOUNCE_INTERVAL = 6 * 3600.0
+
+# How long a node is remembered at all -- a week, or roughly 28 announce
+# intervals. Matches what survives a restart, so the table's memory is the
+# same whether or not it was reloaded. Forgetting a node also loses its keys,
+# which costs a full announce interval to relearn.
 DEFAULT_TTL = 7 * 24 * 3600.0
 
 # How long a *path* is trusted, which is a much shorter question than how long
 # a *node* is remembered. Past this, any working route displaces the one we
 # hold: a short path through a neighbour that stopped answering is worse than
-# a longer one that works. Wants to be a few announce intervals -- long enough
-# to ride out a couple of lost announces, short enough to reroute quickly.
-STALE_AFTER = 300.0
+# a longer one that works.
+#
+# Derived from the announce interval rather than fixed, because the two cannot
+# be set independently. Below one interval every announce arrives already
+# stale and paths thrash on whichever was heard last; far above it, a dead
+# neighbour keeps its route long after the mesh could have repaired around it.
+# Three intervals rides out two lost announces.
+STALE_AFTER = 3 * ANNOUNCE_INTERVAL
 
 # Entries older than this are dropped when the table is loaded from disk.
 MAX_AGE_ON_LOAD = DEFAULT_TTL
