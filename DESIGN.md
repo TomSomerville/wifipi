@@ -77,6 +77,15 @@ offset  size  field
 `type` is an enum because the values are mutually exclusive; `flags` is a
 bitfield because its properties combine.
 
+**Version stays at 1.** Breaking wire changes are made in place rather than
+negotiated: there is one operator, every node can be cycled at will, and a
+mismatched node fails to verify announces rather than doing anything subtle.
+No compatibility shims, no branching on version, no deprecation windows until
+someone other than the author is running nodes.
+
+The field stays in the header because it costs one byte and cannot be added
+later -- the moment it is needed, it is needed retroactively.
+
 **hop_limit is two bytes.** One caps the mesh at 255 relays, roughly 1,000 km
 at realistic hop distances -- a hard ceiling on the diameter of a network
 meant to span continents without touching the internet. Two bytes reach 65,535
