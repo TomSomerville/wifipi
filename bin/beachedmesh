@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""The beachedmesh service.
+
+    sudo ./bin/beachedmesh -i wlan1 --name pi4
+
+Verifies the adapter, puts it in monitor mode, then runs continuously:
+announcing on a timer, relaying what it hears, and learning routes.
+
+One process owns the radio. The dedup cache, route table and flooder only
+work if they observe all traffic, so running the announcer separately -- as
+beachedmesh-announce does -- gives each half a picture.
+"""
+
+import argparse
+import os
+import signal
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from beachedmesh.frame import DEFAULT_HOP_LIMIT                  # noqa: E402
+from beachedmesh.identity import Identity                        # noqa: E402
+from beachedmesh.link import BSSID, CHANNEL                      # noqa: E402
+from beachedmesh.node import Node                                # noqa: E402
+from beachedmesh.routes import ANNOUNCE_INTERVAL, DEFAULT_DB     # noqa: E402
+
+DEFAULT_KEY = "/var/lib/beachedmesh/node.key"
+DRIVER_HINT = "mt7925u"
+
+GRN, RED, YEL, DIM, RST = ("\033[32m", "\033[31m", "\033[33m",
+                           "\033[2m", "\033[0m")
+
+
+def is_root():
+    return getattr(os, "geteuid", lambda: 0)() == 0
+
+
+def run(*cmd):
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def log(level, msg):
+    # Plain lines with a timestamp: journald adds its own metadata, and a
+    # service that formats for a terminal is unreadable in a log file.
+    ts = time.strftime("%H:%M:%S")
+    colour = {"ok": GRN, "warn": YEL, "err": RED}.get(level, "")
+    print(f"[{ts}] {colour}{level:<4}{RST} {msg}", flush=True)
+
+
+def die(msg):
+    log("err", msg)
+    sys.exit(1)
+
+
+def mac_str(b):
+    return ":".join(f"{x:02x}" for x in b)
+
+
+# ---------------------------------------------------------------- adapter --
+
+def verify_and_configure(iface):
+    """Confirm the adapter can do this, then leave it in monitor mode."""
+    if not os.path.exists(f"/sys/class/net/{iface}"):
+        die(f"no such interface: {iface} (attached? lsusb)")
+    if not os.path.exists(f"/sys/class/net/{iface}/phy80211"):
+        die(f"{iface} is not a wireless interface")
+
+    dev = os.path.realpath(f"/sys/class/net/{iface}/device")
+    if "usb" not in dev:
+        die(f"{iface} is not USB-attached -- that looks like the onboard "
+            f"radio, whose MAC runs in firmware and cannot inject")
+
+    drv = os.path.basename(
+        os.path.realpath(f"/sys/class/net/{iface}/device/driver"))
+    log("ok", f"{iface}: {drv} over USB")
+    if drv != DRIVER_HINT:
+        log("warn", f"expected {DRIVER_HINT}; {drv} may work if it is mac80211")
+
+    if "monitor" not in run("iw", "phy").stdout:
+        die(f"driver {drv} does not list monitor in its supported modes")
+
+    # NetworkManager and wpa_supplicant drag the interface back to managed.
+    if run("sh", "-c", "command -v nmcli").returncode == 0:
+        run("nmcli", "device", "set", iface, "managed", "no")
+    run("pkill", "-f", f"wpa_supplicant.*{iface}")
+
+    if iface_type(iface) != "monitor":
+        run("ip", "link", "set", iface, "down")
+        r = run("iw", "dev", iface, "set", "monitor", "otherbss")
+        if r.returncode != 0:
+            r = run("iw", "dev", iface, "set", "type", "monitor")
+        if r.returncode != 0:
+            die(f"{iface} will not enter monitor mode: {r.stderr.strip()}")
+
+    run("ip", "link", "set", iface, "up")
+    if iface_type(iface) != "monitor":
+        die(f"{iface} is type '{iface_type(iface)}', not monitor")
+
+    r = run("iw", "dev", iface, "set", "channel", str(CHANNEL))
+    if r.returncode != 0:
+        log("warn", f"could not set channel {CHANNEL}: {r.stderr.strip()}")
+
+    log("ok", f"{iface} in monitor mode on channel {CHANNEL}, "
+              f"bssid {mac_str(BSSID)}")
+
+
+def iface_type(iface):
+    for line in run("iw", "dev", iface, "info").stdout.splitlines():
+        line = line.strip()
+        if line.startswith("type "):
+            return line.split()[1]
+    return "unknown"
+
+
+# ----------------------------------------------------------------- events --
+
+def make_handlers(node, verbose):
+    def on_announce(info, pkt, meta, route, verdict):
+        if verdict == "own":
+            return
+        rssi = meta.get("rssi")
+        sig = f"{rssi:>4} dBm" if rssi is not None else "   ? dBm"
+        hops = max(0, node.hop_limit - pkt.hop_limit)
+        who = pkt.src.hex()
+        name = (info["app_data"].decode(errors="replace") if info else "") or "-"
+        if route in ("new", "better"):
+            log("ok", f"{route.upper():<9} {who}  {sig}  hops={hops}  "
+                      f"name={name}")
+        elif verbose:
+            log("info", f"{route:<9} {who}  {sig}  hops={hops}")
+
+    def on_event(kind, detail):
+        if kind == "announce-sent":
+            log("info", f"announced, next in "
+                        f"{node.announce_interval / 60:.0f} min")
+        elif kind == "announce-rejected":
+            pkt, why = detail
+            log("warn", f"rejected announce from {pkt.src.hex()}: {why}")
+        elif kind == "expired":
+            log("info", f"expired {detail.hex()} -- no announce in "
+                        f"{node.routes.ttl / 86400:.0f} days")
+        elif kind == "relayed" and verbose:
+            log("info", f"relayed {detail.src.hex()[:8]} "
+                        f"hops_left={detail.hop_limit}")
+
+    node.on_announce = on_announce
+    node.on_event = on_event
+
+
+def report(node):
+    s = node.status()
+    log("info", f"up {s['uptime']/3600:.1f}h  "
+                f"routes {s['hot_routes']:,} ({s['neighbours']} direct)  "
+                f"rx {s['received']:,} tx {s['sent']:,}  "
+                f"relayed {s['relayed']:,} cancelled {s['cancelled']:,}  "
+                f"dup {s['duplicates']:,}")
+    log("info", node.routes.summary())
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("-i", "--iface", required=True,
+                   help="USB wifi adapter, e.g. wlan1")
+    p.add_argument("--name", default="", help="advertise this name")
+    p.add_argument("--key", default=DEFAULT_KEY)
+    p.add_argument("--db", default=DEFAULT_DB)
+    p.add_argument("--announce-interval", type=float,
+                   default=ANNOUNCE_INTERVAL,
+                   help=f"seconds (default {ANNOUNCE_INTERVAL:.0f})")
+    p.add_argument("--hop-limit", type=int, default=DEFAULT_HOP_LIMIT)
+    p.add_argument("--status-every", type=float, default=300.0,
+                   help="seconds between status lines (0 to disable)")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="log relays and refreshed routes too")
+    p.add_argument("--no-configure", action="store_true",
+                   help="assume the interface is already in monitor mode")
+    args = p.parse_args()
+
+    if not is_root():
+        die("must run as root (raw sockets, iw)")
+    if not os.path.exists(args.key):
+        die(f"no identity at {args.key} -- run beachedmesh-setup first")
+
+    if not args.no_configure:
+        verify_and_configure(args.iface)
+
+    ident = Identity.load(args.key)
+    node = Node(args.iface, ident, announce_interval=args.announce_interval,
+                name=args.name, db=args.db, hop_limit=args.hop_limit)
+    make_handlers(node, args.verbose)
+
+    warmed = node.routes.warm()
+    log("ok", f"node {ident.node_id.hex()}"
+              + (f" ({args.name})" if args.name else ""))
+    if warmed:
+        log("ok", f"warmed {warmed:,} routes from disk")
+    log("ok", f"announcing every {args.announce_interval/60:.0f} min, "
+              f"hop limit {args.hop_limit}")
+
+    # Terminate cleanly so buffered route writes reach disk. A service that
+    # loses its last few seconds of learning on every restart is a service
+    # that never accumulates anything.
+    stopping = []
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: stopping.append(True))
+
+    last_status = time.monotonic()
+    while not stopping:
+        node.poll()
+        if args.status_every and time.monotonic() - last_status >= args.status_every:
+            report(node)
+            last_status = time.monotonic()
+
+    log("info", "stopping")
+    report(node)
+    node.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

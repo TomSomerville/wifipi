@@ -1,0 +1,34 @@
+[Unit]
+Description=beachedmesh node
+Documentation=https://github.com/TomSomerville/wifipi
+# The adapter must exist before we try to configure it. USB enumeration is
+# not instant on a Pi, so also see Restart= below.
+After=network.target sys-subsystem-net-devices-wlan1.device
+Wants=sys-subsystem-net-devices-wlan1.device
+
+[Service]
+Type=simple
+ExecStart=/opt/beachedmesh/bin/beachedmesh -i wlan1 --name %H
+WorkingDirectory=/opt/beachedmesh
+
+# Raw sockets and iw need root. No sandboxing beyond this: the daemon needs
+# NET_ADMIN to set monitor mode and NET_RAW to inject.
+User=root
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+
+# SIGTERM is handled: the loop exits, buffered route writes are flushed, and
+# the sqlite connection closes. Give it room to finish rather than killing it
+# mid-write.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+Restart=always
+RestartSec=10
+
+# journald gets plain timestamped lines; the daemon does not format for a
+# terminal.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

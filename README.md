@@ -9,20 +9,26 @@ See [DESIGN.md](DESIGN.md) for the protocol and the reasoning behind it.
 
 ## Status
 
-Announces work. A node generates an identity, broadcasts a signed announce,
-and another node receives it, checks the address really belongs to the key,
-and verifies the signature. Routing is not written yet.
+Runs as a service. A node generates an identity, announces on a timer, relays
+what it hears with duplicate suppression, and learns routes from every
+verified announce. Encryption, data packets and path requests are not written.
 
 ## What is here
 
 ```
+bin/beachedmesh            the service: announce, relay, learn routes
 bin/beachedmesh-setup      one-time: generate this node's identity
-bin/beachedmesh-monitor    verify the adapter, then monitor our traffic
-bin/beachedmesh-announce   broadcast an announce
+bin/beachedmesh-monitor    diagnostics: watch traffic, dump frames
+bin/beachedmesh-announce   diagnostics: send a single announce
 
+beachedmesh/node.py        the loop -- composes everything below
 beachedmesh/frame.py       the packet header: build and parse
 beachedmesh/identity.py    keys, node_id, announce signing and verification
 beachedmesh/link.py        radiotap, 802.11 framing, raw socket
+beachedmesh/flood.py       relay decisions: dedup and counter cancellation
+beachedmesh/routes.py      route storage: hot table in RAM over sqlite
+
+init/beachedmesh.service   systemd unit
 ```
 
 ## Hardware
@@ -53,7 +59,27 @@ sudo ./bin/beachedmesh-setup
 It prints the `node_id` and does nothing if one already exists — a reboot or a
 re-run must never produce a second identity.
 
-On the listening node, verify the adapter and stay in monitor mode:
+Then run the service:
+
+```bash
+sudo ./bin/beachedmesh -i wlan1 --name pi4
+```
+
+It verifies the adapter is a USB device rather than the onboard radio, that
+the driver supports monitor mode, puts the interface in monitor mode on
+channel 1, and then runs: announcing on a timer, relaying what it hears, and
+learning routes. Add `--announce-interval 60` while testing -- the default is
+6 hours.
+
+As a service:
+
+```bash
+sudo cp init/beachedmesh.service /etc/systemd/system/ && sudo systemctl enable --now beachedmesh
+```
+
+## Diagnostics
+
+To watch traffic without running the service, or alongside it:
 
 ```bash
 sudo ./bin/beachedmesh-monitor -i wlan1
