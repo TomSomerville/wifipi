@@ -20,6 +20,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from beachedmesh.control import ControlServer, DEFAULT_SOCKET   # noqa: E402
 from beachedmesh.frame import DEFAULT_HOP_LIMIT                  # noqa: E402
 from beachedmesh.identity import Identity                        # noqa: E402
 from beachedmesh.link import BSSID, CHANNEL                      # noqa: E402
@@ -174,6 +175,8 @@ def main():
                    help="seconds between status lines (0 to disable)")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="log relays and refreshed routes too")
+    p.add_argument("--socket", default=DEFAULT_SOCKET,
+                   help=f"control socket (default {DEFAULT_SOCKET})")
     p.add_argument("--no-configure", action="store_true",
                    help="assume the interface is already in monitor mode")
     args = p.parse_args()
@@ -190,6 +193,12 @@ def main():
     node = Node(args.iface, ident, announce_interval=args.announce_interval,
                 name=args.name, db=args.db, hop_limit=args.hop_limit)
     make_handlers(node, args.verbose)
+
+    control = ControlServer(node, args.socket)
+    if control.error:
+        log("warn", f"control socket unavailable: {control.error}")
+    else:
+        log("ok", f"control socket {args.socket}")
 
     warmed = node.routes.warm()
     log("ok", f"node {ident.node_id.hex()}"
@@ -209,12 +218,14 @@ def main():
     last_status = time.monotonic()
     while not stopping:
         node.poll()
+        control.poll()
         if args.status_every and time.monotonic() - last_status >= args.status_every:
             report(node)
             last_status = time.monotonic()
 
     log("info", "stopping")
     report(node)
+    control.close()
     node.close()
     return 0
 

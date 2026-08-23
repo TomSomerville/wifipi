@@ -28,6 +28,7 @@ beachedmesh/identity.py    keys, node_id, announce signing and verification
 beachedmesh/link.py        radiotap, 802.11 framing, raw socket
 beachedmesh/flood.py       relay decisions: dedup and counter cancellation
 beachedmesh/routes.py      route storage: hot table in RAM over sqlite
+beachedmesh/control.py     unix socket: query the running daemon
 ```
 
 ## Hardware
@@ -84,8 +85,20 @@ What this node knows about reaching others:
 ./bin/beachedmesh-routes --node a1b2c3d4
 ```
 
-Reads the route database directly. sqlite is in WAL mode, so it is safe while
-the service is running, and it needs no root.
+Those read the database — everything ever learned, available whether or not
+the service is running.
+
+To see what the daemon currently *holds*, ask it:
+
+```bash
+./bin/beachedmesh-routes --live
+./bin/beachedmesh-routes --flood
+```
+
+`--live` shows the hot table's actual contents and the LRU cap in effect.
+`--flood` shows relay counters and pending relays, which exist for tens of
+milliseconds and never touch disk. Both go over `/run/beachedmesh.sock`, which
+is world-readable — inspecting a node is not privileged.
 
 ## Diagnostics
 

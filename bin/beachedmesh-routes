@@ -5,9 +5,13 @@
     ./bin/beachedmesh-routes --neighbours    direct only
     ./bin/beachedmesh-routes --node a1b2...  everything about one node
     ./bin/beachedmesh-routes --stats         table sizes and age spread
+    ./bin/beachedmesh-routes --live          the running daemon's hot table
+    ./bin/beachedmesh-routes --flood         relay counters and pending relays
 
-Reads the cold store directly. sqlite is in WAL mode, so this is safe while
-the service is running and needs no root -- it only reads.
+Two sources, showing different things. The database is everything ever
+learned, and is readable whether or not the service runs. --live asks the
+daemon itself, which is the only way to see the hot table's actual contents,
+the LRU cap in effect, and flooder state that never touches disk.
 """
 
 import argparse
@@ -18,7 +22,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from beachedmesh.routes import DEFAULT_DB   # noqa: E402
+from beachedmesh.control import DEFAULT_SOCKET, query   # noqa: E402
+from beachedmesh.routes import DEFAULT_DB               # noqa: E402
 
 DIM, RST = "\033[2m", "\033[0m"
 
@@ -136,6 +141,70 @@ def show_stats(db, path):
         print(f"\nmost heard  {row[0] or '(unnamed)'} -- {row[1]:,} announces")
 
 
+def show_live(sock, limit, neighbours_only):
+    try:
+        r = query("routes", path=sock, limit=limit, neighbours=neighbours_only)
+    except ConnectionError as e:
+        print(f"{e}", file=sys.stderr)
+        print("  is the service running?  systemctl status beachedmesh",
+              file=sys.stderr)
+        return 1
+    st = query("status", path=sock)
+    print(f"node {st['node_id']}"
+          + (f" ({st['name']})" if st.get("name") else "")
+          + f"  up {st['uptime']/3600:.1f}h  on {st['iface']}")
+    print(f"hot {r['hot']:,}/{r['max_hot']:,} "
+          f"({r['memory_bytes']/1e6:.1f} MB)   "
+          f"rx {st['received']:,} tx {st['sent']:,}  "
+          f"relayed {st['relayed']:,} cancelled {st['cancelled']:,}")
+    print(f"next announce in {st['next_announce']/60:.1f} min")
+    print()
+
+    if not r["routes"]:
+        print("  (hot table is empty)")
+        return 0
+    print(f"  {'node':<34} {'via':<19} {'hops':>6} {'rssi':>5} {'age':>6}")
+    print(f"  {'-'*34} {'-'*19} {'-'*6} {'-'*5} {'-'*6}")
+    for e in r["routes"]:
+        hop_s = "direct" if e["hops"] == 0 else str(e["hops"])
+        via = ":".join(e["next_hop"][i:i+2] for i in range(0, 12, 2))
+        print(f"  {e['node_id']:<34} {via:<19} {hop_s:>6} "
+              f"{(e['rssi'] if e['rssi'] is not None else '?'):>5} "
+              f"{age_str(e['age']):>6}")
+    if r["truncated"]:
+        print(f"  {DIM}... {r['hot'] - len(r['routes']):,} more not shown{RST}")
+    return 0
+
+
+def show_flood(sock):
+    try:
+        f = query("flood", path=sock)
+    except ConnectionError as e:
+        print(f"{e}", file=sys.stderr)
+        return 1
+    print(f"relayed    {f['relayed']:,}")
+    print(f"cancelled  {f['cancelled']:,}   "
+          f"{DIM}(another node relayed first){RST}")
+    print(f"duplicates {f['duplicates']:,}   "
+          f"{DIM}(already seen, dropped){RST}")
+    print(f"hop-expired {f['expired_hops']:,}  "
+          f"{DIM}(arrived with no hops left){RST}")
+    print(f"seen cache {f['seen_cache']:,}/{f['seen_capacity']:,}")
+    print(f"threshold  {f['threshold']}  "
+          f"{DIM}(relays heard before cancelling ours){RST}")
+    if f["pending_detail"]:
+        print()
+        print(f"pending relays ({f['pending']}):")
+        for p in f["pending_detail"]:
+            print(f"  {p['src'][:16]}  id={p['packet_id']}  "
+                  f"hops_left={p['hops_left']}  heard={p['heard']}  "
+                  f"fires in {p['in_ms']:.0f} ms")
+    else:
+        print()
+        print("pending relays: none")
+    return 0
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--db", default=DEFAULT_DB)
@@ -145,7 +214,17 @@ def main():
     p.add_argument("--name", help="filter by advertised name")
     p.add_argument("--node", help="full detail for one node (hex prefix)")
     p.add_argument("--stats", action="store_true")
+    p.add_argument("--live", action="store_true",
+                   help="ask the running daemon for its in-memory table")
+    p.add_argument("--flood", action="store_true",
+                   help="relay counters and pending relays from the daemon")
+    p.add_argument("--socket", default=DEFAULT_SOCKET)
     args = p.parse_args()
+
+    if args.live:
+        return show_live(args.socket, args.limit, args.neighbours)
+    if args.flood:
+        return show_flood(args.socket)
 
     db = connect(args.db)
     if args.node:
