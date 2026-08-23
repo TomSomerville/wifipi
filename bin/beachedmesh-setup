@@ -1,68 +1,229 @@
 #!/usr/bin/env python3
-"""One-time node setup: generate this node's identity.
+"""Set this machine up as a beachedmesh node.
 
-    sudo ./bin/beachedmesh-setup
+    sudo ./bin/beachedmesh-setup -i wlan1 --name pi4
 
-The keypair is the only state a node must keep. Its public half determines the
-node's address, so losing the file means becoming a different node -- and
-regenerating on every boot would make the address meaningless. This script is
-therefore idempotent: if the key exists it prints the id and changes nothing.
+Generates the node identity, installs the service, and starts it. Safe to
+re-run: an existing identity is never replaced, and the service is restarted
+rather than duplicated.
+
+    --no-service    identity only, do not touch systemd
+    --interval N    announce every N seconds (default 6 hours; use 60 to test)
+    --force-keys    replace the identity, changing this node's address
 """
 
 import argparse
 import os
+import shutil
 import stat
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from beachedmesh.identity import Identity   # noqa: E402
+from beachedmesh.identity import Identity            # noqa: E402
+from beachedmesh.routes import ANNOUNCE_INTERVAL     # noqa: E402
 
 # Absolute, not ~: under sudo, HOME resolves to /root on some distros and the
 # invoking user on others, which would silently give a node two identities
 # depending on how it was started.
-DEFAULT_KEY = "/var/lib/beachedmesh/node.key"
+STATE_DIR = "/var/lib/beachedmesh"
+DEFAULT_KEY = f"{STATE_DIR}/node.key"
+UNIT_PATH = "/etc/systemd/system/beachedmesh.service"
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+GRN, RED, YEL, DIM, RST = ("\033[32m", "\033[31m", "\033[33m",
+                           "\033[2m", "\033[0m")
+
+
+def ok(m):
+    print(f"{GRN}[ok]{RST}   {m}")
+
+
+def warn(m):
+    print(f"{YEL}[warn]{RST} {m}")
+
+
+def die(m):
+    print(f"{RED}[fail]{RST} {m}", file=sys.stderr)
+    sys.exit(1)
 
 
 def is_root():
-    # geteuid is absent on Windows; these tools are Linux-only, but
-    # keeping the check portable lets the logic be exercised anywhere.
     return getattr(os, "geteuid", lambda: 0)() == 0
+
+
+def run(*cmd):
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+# ---------------------------------------------------------- prerequisites --
+
+def check_deps():
+    try:
+        import cryptography            # noqa: F401
+    except ImportError:
+        die("python3 cryptography is missing:\n"
+            "       pip3 install -r requirements.txt")
+    if not shutil.which("iw"):
+        die("iw is missing:\n       sudo apt install iw")
+    ok("dependencies present")
+
+
+def check_iface(iface):
+    """Warn rather than fail: the adapter may be plugged in later, and the
+    service retries on start anyway."""
+    if not os.path.exists(f"/sys/class/net/{iface}"):
+        warn(f"{iface} does not exist yet -- the service will fail until it does")
+        return
+    if not os.path.exists(f"/sys/class/net/{iface}/phy80211"):
+        warn(f"{iface} is not a wireless interface")
+        return
+    dev = os.path.realpath(f"/sys/class/net/{iface}/device")
+    if "usb" not in dev:
+        warn(f"{iface} is not USB-attached -- the onboard radio cannot inject")
+        return
+    drv = os.path.basename(os.path.realpath(
+        f"/sys/class/net/{iface}/device/driver"))
+    ok(f"{iface}: {drv} over USB")
+
+
+# --------------------------------------------------------------- identity --
+
+def setup_identity(path, force):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+
+    if os.path.exists(path) and not force:
+        ident = Identity.load(path)
+        ok(f"identity {ident.node_id.hex()} (existing, unchanged)")
+        return ident
+
+    if force and os.path.exists(path):
+        warn(f"replacing identity {Identity.load(path).node_id.hex()} -- "
+             f"this node's address changes and peers must relearn it")
+
+    ident = Identity.generate()
+    ident.save(path)
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    ok(f"identity {ident.node_id.hex()} (generated)")
+    if mode & 0o077:
+        warn(f"{path} is mode {mode:04o} -- the private key is readable "
+             f"by others")
+    return ident
+
+
+# ---------------------------------------------------------------- service --
+
+UNIT = """\
+[Unit]
+Description=beachedmesh node
+After=network.target
+# USB enumeration is not instant on a Pi, so the service may start before the
+# adapter appears. Restart= below covers that rather than a device dependency,
+# which would need the interface name baked into the unit name.
+
+[Service]
+Type=simple
+ExecStart={exec_start}
+WorkingDirectory={repo}
+
+# Raw sockets and iw need root: NET_RAW to inject, NET_ADMIN to set monitor
+# mode. No further sandboxing, since those are the whole job.
+User=root
+
+# SIGTERM is handled: the loop exits, buffered route writes are flushed, and
+# sqlite closes. Give it room rather than killing it mid-write.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def have_systemd():
+    return os.path.isdir("/run/systemd/system") and shutil.which("systemctl")
+
+
+def install_service(iface, name, interval):
+    if not have_systemd():
+        warn("no systemd here -- run the service by hand:\n"
+             f"       sudo {REPO}/bin/beachedmesh -i {iface}")
+        return False
+
+    # Point at the repo in place rather than copying to /opt: a git pull then
+    # updates the running service, which is what you want while the protocol
+    # is still moving.
+    cmd = [f"{REPO}/bin/beachedmesh", "-i", iface]
+    if name:
+        cmd += ["--name", name]
+    if interval != ANNOUNCE_INTERVAL:
+        cmd += ["--announce-interval", str(int(interval))]
+
+    with open(UNIT_PATH, "w") as f:
+        f.write(UNIT.format(exec_start=" ".join(cmd), repo=REPO))
+    ok(f"wrote {UNIT_PATH}")
+
+    run("systemctl", "daemon-reload")
+    r = run("systemctl", "enable", "beachedmesh")
+    if r.returncode != 0:
+        die(f"systemctl enable failed: {r.stderr.strip()}")
+    ok("enabled at boot")
+
+    # restart, not start: re-running setup should pick up new arguments.
+    r = run("systemctl", "restart", "beachedmesh")
+    if r.returncode != 0:
+        die(f"systemctl restart failed: {r.stderr.strip()}")
+    ok("service started")
+    return True
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--key", default=DEFAULT_KEY,
-                   help=f"identity file (default {DEFAULT_KEY})")
-    p.add_argument("--force", action="store_true",
-                   help="replace an existing identity (the node changes address)")
+    p.add_argument("-i", "--iface", help="USB wifi adapter, e.g. wlan1")
+    p.add_argument("--name", default="", help="advertise this name")
+    p.add_argument("--key", default=DEFAULT_KEY)
+    p.add_argument("--interval", type=float, default=ANNOUNCE_INTERVAL,
+                   help="announce every N seconds (60 while testing)")
+    p.add_argument("--no-service", action="store_true",
+                   help="identity only, do not touch systemd")
+    p.add_argument("--force-keys", action="store_true",
+                   help="replace the identity, changing this node's address")
     args = p.parse_args()
 
-    if os.path.exists(args.key) and not args.force:
-        ident = Identity.load(args.key)
-        print(f"identity already exists: {ident.node_id.hex()}")
-        print(f"  {args.key}")
-        print("nothing to do (--force to replace, which changes this node's address)")
+    if not is_root():
+        die(f"must run as root to write {STATE_DIR} and install the service")
+    if not args.no_service and not args.iface:
+        die("-i <interface> is required to install the service "
+            "(or pass --no-service for identity only)")
+
+    check_deps()
+    if args.iface:
+        check_iface(args.iface)
+
+    ident = setup_identity(args.key, args.force_keys)
+
+    if args.no_service:
+        print(f"\nidentity only. To run:\n"
+              f"  sudo {REPO}/bin/beachedmesh -i <iface>")
         return 0
 
-    if not is_root() and args.key == DEFAULT_KEY:
-        print(f"must run as root to write {DEFAULT_KEY}", file=sys.stderr)
-        return 1
+    started = install_service(args.iface, args.name, args.interval)
 
-    os.makedirs(os.path.dirname(args.key), mode=0o700, exist_ok=True)
-
-    if args.force and os.path.exists(args.key):
-        old = Identity.load(args.key)
-        print(f"replacing identity {old.node_id.hex()}")
-
-    ident = Identity.generate()
-    ident.save(args.key)
-
-    mode = stat.S_IMODE(os.stat(args.key).st_mode)
-    print(f"generated identity {ident.node_id.hex()}")
-    print(f"  {args.key}  mode {mode:04o}")
-    if mode & 0o077:
-        print("  WARNING: private key is readable by others", file=sys.stderr)
+    print()
+    ok(f"node {ident.node_id.hex()}" + (f" ({args.name})" if args.name else ""))
+    print(f"\n  announcing every {args.interval/60:.0f} min on {args.iface}")
+    if started:
+        print(f"\n  logs     journalctl -u beachedmesh -f")
+        print(f"  routes   {REPO}/bin/beachedmesh-routes")
+        print(f"  stop     sudo systemctl stop beachedmesh")
     return 0
 
 

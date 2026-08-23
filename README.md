@@ -17,7 +17,7 @@ verified announce. Encryption, data packets and path requests are not written.
 
 ```
 bin/beachedmesh            the service: announce, relay, learn routes
-bin/beachedmesh-setup      one-time: generate this node's identity
+bin/beachedmesh-setup      install: identity + service, safe to re-run
 bin/beachedmesh-routes     inspect what routes are known
 bin/beachedmesh-monitor    diagnostics: watch traffic, dump frames
 bin/beachedmesh-announce   diagnostics: send a single announce
@@ -28,8 +28,6 @@ beachedmesh/identity.py    keys, node_id, announce signing and verification
 beachedmesh/link.py        radiotap, 802.11 framing, raw socket
 beachedmesh/flood.py       relay decisions: dedup and counter cancellation
 beachedmesh/routes.py      route storage: hot table in RAM over sqlite
-
-init/beachedmesh.service   systemd unit
 ```
 
 ## Hardware
@@ -51,31 +49,28 @@ Install dependencies, once per node:
 pip3 install -r requirements.txt
 ```
 
-Generate this node's identity, once ever:
+Set the node up. This generates the identity, installs the systemd service and
+starts it:
 
 ```bash
-sudo ./bin/beachedmesh-setup
+sudo ./bin/beachedmesh-setup -i wlan1 --name pi4 --interval 60
 ```
 
-It prints the `node_id` and does nothing if one already exists — a reboot or a
-re-run must never produce a second identity.
+Safe to re-run: an existing identity is never replaced, and the service is
+restarted rather than duplicated. `--interval 60` is for testing — the default
+is 6 hours. `--no-service` generates the identity and stops.
 
-Then run the service:
+The unit points at this checkout rather than copying it elsewhere, so
+`git pull` updates the running service.
+
+```bash
+journalctl -u beachedmesh -f
+```
+
+To run it in the foreground instead:
 
 ```bash
 sudo ./bin/beachedmesh -i wlan1 --name pi4
-```
-
-It verifies the adapter is a USB device rather than the onboard radio, that
-the driver supports monitor mode, puts the interface in monitor mode on
-channel 1, and then runs: announcing on a timer, relaying what it hears, and
-learning routes. Add `--announce-interval 60` while testing -- the default is
-6 hours.
-
-As a service:
-
-```bash
-sudo cp init/beachedmesh.service /etc/systemd/system/ && sudo systemctl enable --now beachedmesh
 ```
 
 ## Inspecting
