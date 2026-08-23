@@ -22,8 +22,21 @@ hop and never authenticated end to end, and packet_id does dedup across
 the mesh, so the field carries no meaning for us. TX_FLAG_NOACK stays --
 broadcast frames should not be ACKed or retried.
 
-**1 Mbps DSSS.** Roughly 15 dB better receiver sensitivity than 6 Mbps OFDM,
-which is worth several times the range. Throughput is not the goal.
+**11 Mbps DSSS.** The design requirement is 10 Mbps, and 11 Mbps is the
+fastest DSSS rate.
+
+Chosen over 12 Mbps OFDM, which is nominally faster, because DSSS spreads each
+symbol across an 11-chip sequence and that processing gain is worth ~10 dB at
+the receiver: 11 Mbps decodes at -89 dBm where 12 Mbps OFDM needs -79. Three
+times the range for 1 Mbps less rate.
+
+Against 1 Mbps DSSS (-97 dBm) this costs 8 dB, roughly 60% of the range. That
+is the price of the throughput requirement, paid deliberately.
+
+Usable throughput is ~6 Mbps after 802.11 overhead. If 10 Mbps *usable* is
+required rather than 10 Mbps nominal, that means 24 Mbps OFDM at -74 dBm --
+another 15 dB, leaving about a fourteenth of the 1 Mbps range.
+
 *Unverified:* whether an 802.11be part honours a legacy rate set via radiotap.
 
 ## Status
@@ -38,8 +51,8 @@ ordinary IP traffic without fragmentation surprises.
 Note the distinction: 1500 is the *ceiling*, not the target. Injected
 broadcast frames get no ACK and no retransmission, and one bit error fails the
 whole frame. At a 1e-5 bit error rate a 1500-byte frame lands 88.7% of the
-time versus 96.1% for 500 bytes; at 1 Mbps it also occupies 12.2 ms of airtime
-versus 4.2 ms. In a flood where several neighbours repeat everything, that
+time versus 96.1% for 500 bytes; at 11 Mbps it also occupies 1.3 ms of
+airtime versus 0.6 ms. In a flood where several neighbours repeat everything, that
 difference compounds. Keep normal traffic small; use the headroom when a
 payload genuinely needs it.
 
@@ -107,7 +120,7 @@ address (802.11 addr2 gives it free), no sequence number (packet_id covers
 dedup).
 
 Cost on air: 24 (802.11) + 45 (ours) + 4 (FCS) = 73 bytes before payload,
-about 584 us at 1 Mbps. Most of it is the 32 bytes of addressing.
+about 245 us at 11 Mbps. Most of it is the 32 bytes of addressing.
 
 ## Deferred work
 
@@ -237,7 +250,7 @@ an AEAD whose 16-byte tag proves per-packet authenticity cheaply.
 
 ## Open questions
 
-- Rate control: whether the 802.11be part honours the 1 Mbps legacy rate set
+- Rate control: whether the 802.11be part honours the 11 Mbps legacy rate set
   via radiotap, or silently transmits at something else. Untested, and the
   range budget depends on it.
 - Routing: managed flood with duplicate suppression is the obvious starting

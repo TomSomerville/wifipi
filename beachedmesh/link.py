@@ -19,7 +19,16 @@ import struct
 ETH_P_ALL = 0x0003
 
 CHANNEL = 1
-RATE_MBPS = 1.0            # 1 Mbps DSSS: ~15 dB more sensitive than 6 Mbps OFDM
+# 11 Mbps DSSS -- the fastest DSSS rate, and the design requirement is 10 Mbps.
+#
+# Worth knowing why this beats 12 Mbps OFDM, which is nominally faster: DSSS
+# spreads each symbol across an 11-chip sequence, and that processing gain is
+# worth ~10 dB at the receiver. 11 Mbps decodes at -89 dBm where 12 Mbps OFDM
+# needs -79 -- three times the range for 1 Mbps less rate.
+#
+# The cost against 1 Mbps DSSS is 8 dB, roughly 40% of the range. That is the
+# price of the throughput requirement, not an accident.
+RATE_MBPS = 11.0
 BROADCAST_MAC = b"\xff" * 6
 BSSID = bytes.fromhex("424541434844")   # "BEACHD"
 

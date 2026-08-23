@@ -127,9 +127,9 @@ Add `--hexdump` to the monitor to see raw packet bytes.
 
 ## Things to watch
 
-- **The rate field.** If received announces report 1 Mbps, the adapter
-  honoured our radiotap rate and the range assumption holds. Anything else
-  means it ignored us.
+- **The rate field.** If received announces report 11 Mbps, the adapter
+  honoured our radiotap rate. Anything else means it ignored us and the link
+  budget in DESIGN.md does not hold.
 - **Power.** A tri-band WiFi 7 adapter draws far more than an onboard radio.
   Use a 3 A supply or a powered hub — brownout looks like random packet loss.
 - **Stay on 2.4 GHz.** 6 GHz brings regulatory complexity and worse
