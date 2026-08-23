@@ -18,6 +18,7 @@ verified announce. Encryption, data packets and path requests are not written.
 ```
 bin/beachedmesh            the service: announce, relay, learn routes
 bin/beachedmesh-setup      one-time: generate this node's identity
+bin/beachedmesh-routes     inspect what routes are known
 bin/beachedmesh-monitor    diagnostics: watch traffic, dump frames
 bin/beachedmesh-announce   diagnostics: send a single announce
 
@@ -76,6 +77,20 @@ As a service:
 ```bash
 sudo cp init/beachedmesh.service /etc/systemd/system/ && sudo systemctl enable --now beachedmesh
 ```
+
+## Inspecting
+
+What this node knows about reaching others:
+
+```bash
+./bin/beachedmesh-routes
+./bin/beachedmesh-routes --stats
+./bin/beachedmesh-routes --neighbours
+./bin/beachedmesh-routes --node a1b2c3d4
+```
+
+Reads the route database directly. sqlite is in WAL mode, so it is safe while
+the service is running, and it needs no root.
 
 ## Diagnostics
 

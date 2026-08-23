@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Show what this node knows about reaching others.
+
+    ./bin/beachedmesh-routes                 recent routes
+    ./bin/beachedmesh-routes --neighbours    direct only
+    ./bin/beachedmesh-routes --node a1b2...  everything about one node
+    ./bin/beachedmesh-routes --stats         table sizes and age spread
+
+Reads the cold store directly. sqlite is in WAL mode, so this is safe while
+the service is running and needs no root -- it only reads.
+"""
+
+import argparse
+import os
+import sqlite3
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from beachedmesh.routes import DEFAULT_DB   # noqa: E402
+
+DIM, RST = "\033[2m", "\033[0m"
+
+
+def age_str(seconds):
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f}m"
+    if seconds < 172800:
+        return f"{seconds / 3600:.0f}h"
+    return f"{seconds / 86400:.1f}d"
+
+
+def mac(b):
+    return ":".join(f"{x:02x}" for x in b) if b else "?"
+
+
+def connect(path):
+    if not os.path.exists(path):
+        print(f"no route database at {path}\n"
+              f"  the service creates it on first run: "
+              f"sudo ./bin/beachedmesh -i wlan1", file=sys.stderr)
+        sys.exit(1)
+    # Read-only: this must never be the thing that corrupts a live table.
+    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+
+def show_routes(db, limit, neighbours_only, name_filter):
+    where, params = [], []
+    if neighbours_only:
+        where.append("hops = 0")
+    if name_filter:
+        where.append("name LIKE ?")
+        params.append(f"%{name_filter}%")
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    params.append(limit)
+
+    rows = db.execute(f"""
+        SELECT node_id, next_hop, hops, rssi, last_seen, announces, name
+        FROM routes {clause}
+        ORDER BY hops ASC, last_seen DESC LIMIT ?""", params).fetchall()
+
+    if not rows:
+        print("no routes yet -- has the service heard an announce?")
+        return
+
+    now = time.time()
+    print(f"  {'node':<34} {'via':<19} {'hops':>6} {'rssi':>5} "
+          f"{'age':>6} {'seen':>5}  name")
+    print(f"  {'-'*34} {'-'*19} {'-'*6} {'-'*5} {'-'*6} {'-'*5}  {'-'*10}")
+    for nid, nh, hops, rssi, last, ann, nm in rows:
+        hop_s = "direct" if hops == 0 else str(hops)
+        print(f"  {nid.hex():<34} {mac(nh):<19} {hop_s:>6} "
+              f"{(rssi if rssi is not None else '?'):>5} "
+              f"{age_str(now - last):>6} {ann:>5}  {nm or ''}")
+
+
+def show_node(db, prefix):
+    rows = db.execute("""
+        SELECT node_id, next_hop, hops, rssi, first_seen, last_seen,
+               announces, sign_pub, encrypt_pub, name
+        FROM routes WHERE hex(node_id) LIKE ?""",
+        (prefix.upper() + "%",)).fetchall()
+    if not rows:
+        print(f"no node matching {prefix}")
+        return
+    now = time.time()
+    for (nid, nh, hops, rssi, first, last, ann, sp, ep, nm) in rows:
+        print(f"node        {nid.hex()}")
+        print(f"  name      {nm or '-'}")
+        print(f"  next hop  {mac(nh)}")
+        print(f"  distance  {'direct' if hops == 0 else str(hops) + ' hops'}")
+        print(f"  signal    {rssi if rssi is not None else '?'} dBm")
+        print(f"  announces {ann}")
+        print(f"  first     {age_str(now - first)} ago")
+        print(f"  last      {age_str(now - last)} ago")
+        print(f"  sign key  {sp.hex() if sp else '(not stored)'}")
+        print(f"  encr key  {ep.hex() if ep else '(not stored)'}")
+        print()
+
+
+def show_stats(db, path):
+    total = db.execute("SELECT COUNT(*) FROM routes").fetchone()[0]
+    if not total:
+        print("route table is empty")
+        return
+    direct = db.execute("SELECT COUNT(*) FROM routes WHERE hops=0").fetchone()[0]
+    size = os.path.getsize(path)
+    print(f"routes      {total:,}  ({direct:,} direct neighbours)")
+    print(f"database    {size/1e6:.1f} MB  ({size/total:.0f} B/row)")
+
+    print("\nby distance")
+    for hops, n in db.execute(
+            "SELECT hops, COUNT(*) FROM routes GROUP BY hops ORDER BY hops"):
+        label = "direct" if hops == 0 else f"{hops} hop" + ("s" if hops > 1 else "")
+        print(f"  {label:<10} {n:>8,}")
+
+    now = time.time()
+    print("\nby age")
+    buckets = [(300, "< 5 min"), (3600, "< 1 hour"), (86400, "< 1 day"),
+               (604800, "< 1 week"), (float("inf"), "older")]
+    prev = 0
+    for cutoff, label in buckets:
+        n = db.execute("SELECT COUNT(*) FROM routes WHERE ? - last_seen >= ? "
+                       "AND ? - last_seen < ?",
+                       (now, prev, now, cutoff)).fetchone()[0]
+        if n:
+            print(f"  {label:<10} {n:>8,}")
+        prev = cutoff
+
+    row = db.execute("SELECT name, announces FROM routes "
+                     "ORDER BY announces DESC LIMIT 1").fetchone()
+    if row and row[1] > 1:
+        print(f"\nmost heard  {row[0] or '(unnamed)'} -- {row[1]:,} announces")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--db", default=DEFAULT_DB)
+    p.add_argument("-n", "--limit", type=int, default=40)
+    p.add_argument("--neighbours", action="store_true",
+                   help="only nodes heard directly")
+    p.add_argument("--name", help="filter by advertised name")
+    p.add_argument("--node", help="full detail for one node (hex prefix)")
+    p.add_argument("--stats", action="store_true")
+    args = p.parse_args()
+
+    db = connect(args.db)
+    if args.node:
+        show_node(db, args.node)
+    elif args.stats:
+        show_stats(db, args.db)
+    else:
+        show_routes(db, args.limit, args.neighbours, args.name)
+    db.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
