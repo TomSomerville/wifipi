@@ -46,6 +46,19 @@ def run(*cmd):
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
+def report_checkout():
+    """The source tree is left alone deliberately.
+
+    A script cannot reliably delete the directory it is executing from, and
+    the checkout is source rather than node state -- removing it is a separate
+    decision from removing the node.
+    """
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    print()
+    print(f"{DIM}the checkout at {repo} is untouched{RST}")
+    print(f"{DIM}  remove it with:  cd ~ && rm -rf {os.path.basename(repo)}{RST}")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--purge", action="store_true",
@@ -60,7 +73,6 @@ def main():
         return 1
 
     dry = args.dry_run
-    act = (lambda m: skip(f"would {m}")) if dry else None
 
     # ---- service ----
     if shutil.which("systemctl") and os.path.exists(UNIT_PATH):
@@ -109,10 +121,12 @@ def main():
             warn(f"keeping {STATE_DIR} (identity and routes)")
             print(f"       reinstalling keeps this node's address")
             print(f"       --purge to delete it, which cannot be undone")
+        report_checkout()
         return 0
 
     if not os.path.exists(STATE_DIR):
         skip(f"no state at {STATE_DIR}")
+        report_checkout()
         return 0
 
     if os.path.exists(KEY) and not dry:
