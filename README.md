@@ -31,6 +31,7 @@ beachedmesh/link.py        radiotap, 802.11 framing, raw socket
 beachedmesh/flood.py       relay decisions: dedup and counter cancellation
 beachedmesh/routes.py      route storage: hot table in RAM over sqlite
 beachedmesh/control.py     unix socket: query the running daemon
+beachedmesh/recover.py     detect a deaf radio, reload the driver
 ```
 
 ## Hardware
@@ -147,8 +148,17 @@ Seen on both a Pi and a laptop, after moving the adapter between USB ports.
 The node keeps transmitting -- peers hear its announces -- but it receives
 nothing at all, not even ambient beacons from neighbouring access points.
 
-**A reboot does not fix it.** The USB port stays powered across a warm reboot,
-so the adapter comes back in the same state. Reloading the driver does, and
+**The service now detects this itself.** After the adapter passes every other
+check at startup, it listens for three seconds; if not one frame arrives -- not
+a beacon, not anything -- it reloads the mt76 stack and configures the adapter
+again, up to twice, then runs anyway rather than exiting. So a reboot recovers
+on its own, which matters because on one laptop this fault reproduced on
+*every* boot: a warm reboot leaves the USB port powered, so the adapter is
+never actually reset. `--no-listen-check` turns the test off.
+
+**A reboot does not fix it by itself.** The USB port stays powered across a
+warm reboot, so the adapter comes back in the same state. Reloading the driver
+does, and
 `beachedmesh-laptopreset` does the whole sequence -- confirm the radio is deaf,
 reload, restart the service, confirm it hears again:
 

@@ -25,6 +25,7 @@ from beachedmesh.frame import DEFAULT_HOP_LIMIT                  # noqa: E402
 from beachedmesh.identity import Identity                        # noqa: E402
 from beachedmesh.link import BSSID, CHANNEL, MonitorLink         # noqa: E402
 from beachedmesh.node import Node                                # noqa: E402
+from beachedmesh import recover                                  # noqa: E402
 from beachedmesh.routes import ANNOUNCE_INTERVAL, DEFAULT_DB     # noqa: E402
 
 DEFAULT_KEY = "/var/lib/beachedmesh/node.key"
@@ -144,6 +145,45 @@ def verify_and_configure(iface):
     return True
 
 
+# How many times to reload the driver for a deaf radio before giving up and
+# running anyway. One reload is the documented remedy; a second covers a
+# reload that raced the USB re-enumeration. Past that the fault is something
+# else, and a node that keeps announcing is worth more than one that retries
+# forever -- peers can still hear it, and the status line reports rx 0.
+MAX_DEAF_RELOADS = 2
+
+
+def radio_hears(iface):
+    """True if anything at all is arriving. None if it cannot be tested."""
+    heard = recover.frames_heard(iface)
+    if heard is None:
+        log("warn", f"cannot listen on {iface} to test the receive path")
+        return None
+    if heard:
+        log("ok", f"receive path alive ({heard:,} frames in "
+                  f"{recover.LISTEN_SECONDS:g}s)")
+        return True
+    return False
+
+
+def recover_deaf_radio(iface, attempt):
+    """Reload the driver under a radio that hears nothing. True if it is back.
+
+    Called only after the adapter has passed every other check, which is
+    exactly when this fault is invisible: monitor mode set, channel set,
+    injection accepted, and not one frame arriving.
+    """
+    log("err", f"{iface} hears nothing at all -- receive path is dead below "
+               f"beachedmesh (reload {attempt}/{MAX_DEAF_RELOADS})")
+    if not recover.reload_driver(log):
+        return False
+    if not recover.wait_for_iface(iface):
+        log("err", f"{iface} did not come back after the reload")
+        return False
+    log("ok", f"{iface} is back")
+    return True
+
+
 def iface_type(iface):
     for line in run("iw", "dev", iface, "info").stdout.splitlines():
         line = line.strip()
@@ -216,6 +256,8 @@ def main():
                    help=f"control socket (default {DEFAULT_SOCKET})")
     p.add_argument("--no-configure", action="store_true",
                    help="assume the interface is already in monitor mode")
+    p.add_argument("--no-listen-check", action="store_true",
+                   help="skip the receive-path test; never reload the driver")
     args = p.parse_args()
 
     if not is_root():
@@ -231,10 +273,23 @@ def main():
 
     if not args.no_configure:
         attempt = 0
+        reloads = 0
         while not stopping:
             if (wait_for_iface(args.iface, stopping)
                     and verify_and_configure(args.iface)):
-                break
+                # Everything above says the adapter is fine. Only now is the
+                # deaf-radio fault distinguishable from a healthy node, and
+                # only by listening.
+                if args.no_listen_check or radio_hears(args.iface) is not False:
+                    break
+                if reloads >= MAX_DEAF_RELOADS:
+                    log("warn", "still deaf after reloading -- running anyway. "
+                                "Peers will hear this node; it will hear "
+                                "nobody. Unplug the adapter for ten seconds")
+                    break
+                reloads += 1
+                recover_deaf_radio(args.iface, reloads)
+                continue
             attempt += 1
             delay = min(60, 5 * attempt)
             log("warn", f"adapter not usable, retrying in {delay}s "

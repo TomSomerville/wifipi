@@ -23,25 +23,19 @@ trusting the service to report its own health.
 
 import argparse
 import os
-import select
 import shutil
-import socket
 import subprocess
 import sys
 import time
 
-# Unload order matters: dependents before dependencies, or modprobe refuses.
-MODULES = ["mt7925u", "mt7925_common", "mt792x_lib", "mt76_usb", "mt76"]
-LOAD = "mt7925u"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-ETH_P_ALL = 0x0003
+from beachedmesh import recover                    # noqa: E402
 
-# Long enough that a quiet 2.4 GHz band still produces beacons -- an access
-# point beacons about ten times a second, so anything alive answers at once.
-SNIFF_SECONDS = 3.0
-
-# The adapter re-enumerates over USB after the reload, which is not instant.
-REAPPEAR_TIMEOUT = 20.0
+# The listening and the driver reload are shared with the service, which does
+# the same check on startup -- one definition of "deaf" for both, so a node
+# that recovers itself and a node recovered by hand behave identically.
+SNIFF_SECONDS = recover.LISTEN_SECONDS
 
 # The service sets monitor mode and channel itself on start; verifying before
 # it has done that would fail for the wrong reason.
@@ -98,37 +92,10 @@ def iface_info(iface):
 
 
 def sniff(iface, seconds):
-    """Count frames of any kind. This is the whole diagnosis.
-
-    Deliberately unfiltered and independent of everything else here: a radio
-    whose receive path works sees the world's beacons whether or not a single
-    mesh node is switched on. Filtering for our own traffic would confuse a
-    dead radio with an empty mesh.
-    """
-    try:
-        s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW,
-                          socket.htons(ETH_P_ALL))
-        s.bind((iface, ETH_P_ALL))
-    except OSError as e:
-        err(f"cannot open {iface}: {e}")
-        return None
-
-    frames = 0
-    deadline = time.monotonic() + seconds
-    try:
-        while True:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                break
-            if not select.select([s], [], [], left)[0]:
-                continue
-            try:
-                if s.recv(4096):
-                    frames += 1
-            except OSError:
-                break
-    finally:
-        s.close()
+    """Count frames of any kind. This is the whole diagnosis."""
+    frames = recover.frames_heard(iface, seconds)
+    if frames is None:
+        err(f"cannot listen on {iface}")
     return frames
 
 
@@ -137,45 +104,15 @@ def service_installed():
 
 
 def reload_driver():
-    """Unload the whole stack, then load the top of it back.
+    """Unload the whole stack, then load the top of it back."""
+    def say(level, msg):
+        {"ok": ok, "warn": warn, "err": err}.get(level, note)(msg)
 
-    Removing only mt7925u leaves mt76 holding device state, and that state is
-    what is broken -- so the dependencies come out too. Loading mt7925u pulls
-    them back in by dependency.
-    """
-    r = run("modprobe", "-r", *MODULES)
-    if r.returncode != 0:
-        output = r.stderr + r.stdout
-        # -r fails as a batch if any one module is busy, so report the reason
-        # rather than the exit code: "in use" means something still holds the
-        # interface, which is a different fix.
-        last = output.strip().splitlines()
-        warn("module unload reported: " + (last[-1] if last else "failed"))
-        if "in use" in output:
-            note("something still holds the radio -- stop NetworkManager or "
-                 "wpa_supplicant and run this again")
-            return False
-    else:
-        ok("mt76 stack unloaded")
-
-    # The USB device has to settle before the driver will bind to it again.
-    time.sleep(3)
-
-    r = run("modprobe", LOAD)
-    if r.returncode != 0:
-        err(f"loading {LOAD} failed: {(r.stderr or r.stdout).strip()}")
+    if not recover.reload_driver(say):
+        note("if a module is still in use, stop NetworkManager or "
+             "wpa_supplicant and run this again")
         return False
-    ok(f"{LOAD} loaded")
     return True
-
-
-def wait_for(iface, timeout=REAPPEAR_TIMEOUT):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if exists(iface):
-            return True
-        time.sleep(0.5)
-    return False
 
 
 def unplug_advice():
@@ -245,8 +182,9 @@ def main():
     if not reload_driver():
         return 1
 
-    if not wait_for(iface):
-        err(f"{iface} did not come back within {REAPPEAR_TIMEOUT:g}s")
+    if not recover.wait_for_iface(iface):
+        err(f"{iface} did not come back within "
+            f"{recover.REAPPEAR_TIMEOUT:g}s")
         unplug_advice()
         return 1
     ok(f"{iface} is back")
