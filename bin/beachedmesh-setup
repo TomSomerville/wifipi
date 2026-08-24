@@ -10,6 +10,7 @@ rather than duplicated.
     --no-service    identity only, do not touch systemd
     --interval N    announce every N seconds (default 6 hours; use 60 to test)
     --force-keys    replace the identity, changing this node's address
+    --no-rename     leave the adapter under its kernel name
 """
 
 import argparse
@@ -87,6 +88,132 @@ def check_iface(iface):
     drv = os.path.basename(os.path.realpath(
         f"/sys/class/net/{iface}/device/driver"))
     ok(f"{iface}: {drv} over USB")
+
+
+# ----------------------------------------------------------------- rename --
+
+# Why rename at all: wlan0/wlan1 are assigned in probe order, so a reboot that
+# enumerates the onboard radio second silently swaps them, and the service
+# then puts the *onboard* radio in monitor mode and never transmits. A name
+# this repo owns cannot be handed to a different device by accident.
+IFACE_PREFIX = "BCHD"
+
+# udev makes the name survive a reboot. Without the rule the kernel takes the
+# name back on the next boot and the unit points at an interface that no
+# longer exists. Numbered 70- to land after the persistent-net rules that ship
+# with the distro, so ours is the one that wins.
+UDEV_RULES = "/etc/udev/rules.d/70-beachedmesh-net.rules"
+
+RULE_HEADER = ("# beachedmesh: pin adapters to stable names by MAC.\n"
+               "# Written by beachedmesh-setup. One line per adapter.\n")
+
+
+def mac_of(iface):
+    try:
+        with open(f"/sys/class/net/{iface}/address") as f:
+            return f.read().strip().lower()
+    except OSError:
+        return None
+
+
+def existing_ifaces():
+    try:
+        return set(os.listdir("/sys/class/net"))
+    except OSError:
+        return set()
+
+
+def read_rules():
+    """{mac: name} for the adapters we have already claimed."""
+    claimed = {}
+    if not os.path.exists(UDEV_RULES):
+        return claimed
+    with open(UDEV_RULES) as f:
+        for line in f:
+            if line.lstrip().startswith("#") or "NAME=" not in line:
+                continue
+            mac = name = None
+            for part in line.split(","):
+                part = part.strip()
+                if part.startswith('ATTR{address}=='):
+                    mac = part.split('"')[1].lower()
+                elif part.startswith("NAME="):
+                    name = part.split('"')[1]
+            if mac and name:
+                claimed[mac] = name
+    return claimed
+
+
+def allocate_name(mac, claimed):
+    """Lowest free BCHDn. Reuses this adapter's own number if it has one.
+
+    "Free" means claimed by no rule *and* held by no interface currently
+    present. An unclaimed BCHD0 sitting on the system -- renamed by hand, or
+    left by a rules file someone deleted -- would otherwise get a second
+    adapter renamed on top of it, and the rename simply fails.
+    """
+    if mac in claimed:
+        return claimed[mac]
+    taken = set(claimed.values()) | existing_ifaces()
+    n = 0
+    while f"{IFACE_PREFIX}{n}" in taken:
+        n += 1
+    return f"{IFACE_PREFIX}{n}"
+
+
+def write_rule(mac, new_name):
+    claimed = read_rules()
+    claimed[mac] = new_name
+    with open(UDEV_RULES, "w") as f:
+        f.write(RULE_HEADER)
+        for m, n in sorted(claimed.items(), key=lambda kv: kv[1]):
+            f.write(f'SUBSYSTEM=="net", ACTION=="add", ATTR{{address}}=="{m}", '
+                    f'NAME="{n}"\n')
+    ok(f"{UDEV_RULES}: {mac} -> {new_name}")
+    if shutil.which("udevadm"):
+        run("udevadm", "control", "--reload-rules")
+
+
+def rename_iface(iface, no_rename):
+    """Give the adapter a name of ours, now and after every reboot.
+
+    Returns the name the service should use -- the original one if anything
+    here could not be done, since a working node under the wrong name beats a
+    setup that failed.
+    """
+    if no_rename:
+        return iface
+    if iface.startswith(IFACE_PREFIX):
+        ok(f"{iface} already named by beachedmesh")
+        return iface
+    if not os.path.exists(f"/sys/class/net/{iface}"):
+        warn(f"{iface} is not present -- cannot rename it yet")
+        return iface
+
+    mac = mac_of(iface)
+    if not mac:
+        warn(f"cannot read the MAC of {iface} -- leaving its name alone")
+        return iface
+    if not shutil.which("ip"):
+        warn("ip is missing -- leaving the adapter name alone")
+        return iface
+
+    new_name = allocate_name(mac, read_rules())
+
+    # The kernel refuses to rename an interface that is up.
+    run("ip", "link", "set", iface, "down")
+    r = run("ip", "link", "set", iface, "name", new_name)
+    if r.returncode != 0:
+        run("ip", "link", "set", iface, "up")
+        warn(f"could not rename {iface}: {(r.stderr or r.stdout).strip()}")
+        return iface
+    run("ip", "link", "set", new_name, "up")
+    ok(f"renamed {iface} -> {new_name}")
+
+    # The rule is written after the live rename succeeds, so a failed rename
+    # does not leave a rule promising a name nothing will ever have.
+    write_rule(mac, new_name)
+    return new_name
 
 
 # --------------------------------------------------------------- identity --
@@ -222,7 +349,7 @@ def main():
               f"  sudo {REPO}/bin/beachedmesh -i <iface>")
         return 0
 
-    started = install_service(args.iface, args.name, args.interval)
+    started = install_service(iface, args.name, args.interval)
 
     print()
     ok(f"node {ident.node_id.hex()}" + (f" ({args.name})" if args.name else ""))

@@ -63,6 +63,14 @@ Safe to re-run: an existing identity is never replaced, and the service is
 restarted rather than duplicated. `--interval 60` is for testing — the default
 is 6 hours. `--no-service` generates the identity and stops.
 
+Setup renames the adapter you gave it to `BCHD0` — `BCHD1`, `BCHD2` and so on
+if those are taken — and pins that name to the adapter's MAC with a udev rule
+in `/etc/udev/rules.d/70-beachedmesh-net.rules`, so it survives a reboot. The
+service is installed against the new name. This exists because `wlan0`/`wlan1`
+are handed out in probe order: a boot that enumerates the radios the other way
+round puts the *onboard* chip into monitor mode, which cannot inject, and the
+node goes quiet for no visible reason. `--no-rename` keeps the kernel name.
+
 The unit points at this checkout rather than copying it elsewhere, so
 `git pull` updates the running service.
 
