@@ -20,7 +20,7 @@ bin/beachedmesh            the service: announce, relay, learn routes
 bin/beachedmesh-setup      install: identity + service, safe to re-run
 bin/beachedmesh-routes     inspect what routes are known
 bin/beachedmesh-monitor    diagnostics: watch traffic, dump frames
-bin/beachedmesh-announce   diagnostics: send a single announce
+bin/beachedmesh-announce   send an announce on demand
 
 beachedmesh/node.py        the loop -- composes everything below
 beachedmesh/frame.py       the packet header: build and parse
@@ -114,14 +114,20 @@ and that the driver accepts injected frames. Then it prints only our traffic —
 frames whose BSSID is `42:45:41:43:48:44` ("BEACHD") and whose packet magic is
 `BCHD`. Ambient wifi is discarded.
 
-On another node, send an announce:
+Send an announce on demand, rather than waiting for the timer:
 
 ```bash
-sudo ./bin/beachedmesh-announce -i wlan1 --name pi4 --once
+./bin/beachedmesh-announce
+./bin/beachedmesh-announce -n 5
 ```
 
-The monitor should print the announce with a matching node_id, `verified`, the
-name, `hops=0` and a signal reading. Drop `--once` to repeat every 60 seconds.
+This asks the running service to announce, so it needs no root and no
+interface — one process owns the radio, and an announce sent around it would
+never enter its flooder or seen cache. With no service running it falls back
+to its own socket, which then needs `sudo` and `-i wlan1`.
+
+The other node should print the announce with a matching node_id, `verified`,
+the name, `hops=0` and a signal reading.
 
 Add `--hexdump` to the monitor to see raw packet bytes.
 

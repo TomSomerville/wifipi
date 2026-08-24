@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Send an announce packet.
 
-    sudo ./bin/beachedmesh-announce -i wlan1 --name pi4
-    sudo ./bin/beachedmesh-announce -i wlan1 --once
+    ./bin/beachedmesh-announce                     via the running service
+    sudo ./bin/beachedmesh-announce -i wlan1       standalone, no service
+
+If the service is running, this asks it to announce and needs no root: one
+process owns the radio, and its flooder and seen cache stay consistent. Only
+when no daemon answers does this open its own socket and transmit directly.
 
 An announce advertises this node's address and public keys, signed. It is the
 one packet type sent in the clear: it carries the keys everything else is
@@ -19,7 +23,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from beachedmesh.frame import Packet, TYPE_ANNOUNCE   # noqa: E402
+from beachedmesh.control import DEFAULT_SOCKET, query  # noqa: E402
+from beachedmesh.frame import Packet, TYPE_ANNOUNCE    # noqa: E402
 from beachedmesh.identity import Identity            # noqa: E402
 from beachedmesh.link import CHANNEL, MonitorLink    # noqa: E402
 
@@ -70,10 +75,30 @@ def require_monitor(iface):
     return True
 
 
+def via_daemon(sock, count, interval):
+    """Ask the running service to announce. Returns False if none is there."""
+    try:
+        query("status", path=sock)
+    except ConnectionError:
+        return False
+    for i in range(count):
+        r = query("announce", path=sock)
+        print(f"[{time.strftime('%H:%M:%S')}] sent via service  "
+              f"id={r['packet_id']}  {r['bytes']} bytes")
+        if i + 1 < count:
+            time.sleep(interval)
+    return True
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("-i", "--iface", required=True,
-                   help="monitor-mode interface, e.g. wlan1")
+    p.add_argument("-i", "--iface",
+                   help="monitor-mode interface (only needed standalone)")
+    p.add_argument("--socket", default=DEFAULT_SOCKET)
+    p.add_argument("-n", "--count", type=int, default=1,
+                   help="how many to send (default 1)")
+    p.add_argument("--standalone", action="store_true",
+                   help="always use our own radio, never the service")
     p.add_argument("--key", default=DEFAULT_KEY)
     p.add_argument("--interval", type=int, default=60,
                    help="seconds between announces (default 60)")
@@ -81,8 +106,25 @@ def main():
     p.add_argument("--once", action="store_true", help="send one and exit")
     args = p.parse_args()
 
+    # Prefer the running service: it owns the radio, so an announce sent
+    # around it never enters its flooder or seen cache. This path needs no
+    # root and no interface.
+    if not args.standalone:
+        gap = 0 if args.once else args.interval
+        if via_daemon(args.socket, args.count, gap):
+            return 0
+        if not args.iface:
+            print("no service running, and no -i given -- start the service "
+                  "or pass an interface", file=sys.stderr)
+            return 1
+        print("no service running, using our own radio", file=sys.stderr)
+
     if not is_root():
         print("must run as root (raw sockets)", file=sys.stderr)
+        return 1
+    if not args.iface:
+        print("-i <interface> is required without a running service",
+              file=sys.stderr)
         return 1
     if not os.path.exists(args.key):
         print(f"no identity at {args.key} -- run beachedmesh-setup first",
