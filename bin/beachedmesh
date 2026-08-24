@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from beachedmesh.control import ControlServer, DEFAULT_SOCKET   # noqa: E402
 from beachedmesh.frame import DEFAULT_HOP_LIMIT                  # noqa: E402
 from beachedmesh.identity import Identity                        # noqa: E402
-from beachedmesh.link import BSSID, CHANNEL                      # noqa: E402
+from beachedmesh.link import BSSID, CHANNEL, MonitorLink         # noqa: E402
 from beachedmesh.node import Node                                # noqa: E402
 from beachedmesh.routes import ANNOUNCE_INTERVAL, DEFAULT_DB     # noqa: E402
 
@@ -61,17 +61,49 @@ def mac_str(b):
 
 # ---------------------------------------------------------------- adapter --
 
+def wait_for_iface(iface, stopping):
+    """Block until the interface exists. Never give up.
+
+    An unattended node -- a solar site that drained its battery and came back
+    days later -- must recover without anyone present. Exiting because the
+    adapter has not enumerated yet turns a 5 second delay into a permanently
+    dead node, because systemd gives up after a few rapid failures.
+    """
+    if os.path.exists(f"/sys/class/net/{iface}"):
+        return True
+    log("warn", f"{iface} not present -- waiting for it to appear")
+    waited = 0
+    while not stopping:
+        time.sleep(2)
+        waited += 2
+        if os.path.exists(f"/sys/class/net/{iface}"):
+            log("ok", f"{iface} appeared after {waited}s")
+            # Enumerating is not the same as ready: the driver still has
+            # firmware to load before it will accept configuration.
+            time.sleep(2)
+            return True
+        if waited % 60 == 0:
+            log("warn", f"still waiting for {iface} ({waited // 60} min)")
+    return False
+
+
 def verify_and_configure(iface):
-    """Confirm the adapter can do this, then leave it in monitor mode."""
-    if not os.path.exists(f"/sys/class/net/{iface}"):
-        die(f"no such interface: {iface} (attached? lsusb)")
+    """Confirm the adapter can do this, then leave it in monitor mode.
+
+    Returns False if the adapter is present but unusable, so the caller can
+    wait and retry rather than exiting -- the adapter may be replaced, or the
+    driver may still be settling.
+    """
     if not os.path.exists(f"/sys/class/net/{iface}/phy80211"):
-        die(f"{iface} is not a wireless interface")
+        log("err", f"{iface} is not a wireless interface")
+        return False
 
     dev = os.path.realpath(f"/sys/class/net/{iface}/device")
     if "usb" not in dev:
-        die(f"{iface} is not USB-attached -- that looks like the onboard "
-            f"radio, whose MAC runs in firmware and cannot inject")
+        log("err", f"{iface} is not USB-attached -- that looks like the "
+                   f"onboard radio, whose MAC runs in firmware and cannot "
+                   f"inject")
+        return False
 
     drv = os.path.basename(
         os.path.realpath(f"/sys/class/net/{iface}/device/driver"))
@@ -80,7 +112,8 @@ def verify_and_configure(iface):
         log("warn", f"expected {DRIVER_HINT}; {drv} may work if it is mac80211")
 
     if "monitor" not in run("iw", "phy").stdout:
-        die(f"driver {drv} does not list monitor in its supported modes")
+        log("err", f"driver {drv} does not list monitor in its supported modes")
+        return False
 
     # NetworkManager and wpa_supplicant drag the interface back to managed.
     if run("sh", "-c", "command -v nmcli").returncode == 0:
@@ -93,11 +126,14 @@ def verify_and_configure(iface):
         if r.returncode != 0:
             r = run("iw", "dev", iface, "set", "type", "monitor")
         if r.returncode != 0:
-            die(f"{iface} will not enter monitor mode: {r.stderr.strip()}")
+            log("err", f"{iface} will not enter monitor mode: "
+                       f"{r.stderr.strip()}")
+            return False
 
     run("ip", "link", "set", iface, "up")
     if iface_type(iface) != "monitor":
-        die(f"{iface} is type '{iface_type(iface)}', not monitor")
+        log("err", f"{iface} is type '{iface_type(iface)}', not monitor")
+        return False
 
     r = run("iw", "dev", iface, "set", "channel", str(CHANNEL))
     if r.returncode != 0:
@@ -105,6 +141,7 @@ def verify_and_configure(iface):
 
     log("ok", f"{iface} in monitor mode on channel {CHANNEL}, "
               f"bssid {mac_str(BSSID)}")
+    return True
 
 
 def iface_type(iface):
@@ -186,8 +223,25 @@ def main():
     if not os.path.exists(args.key):
         die(f"no identity at {args.key} -- run beachedmesh-setup first")
 
+    # Installed before any waiting, so a stop request during hardware
+    # bring-up is honoured rather than ignored until the adapter appears.
+    stopping = []
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: stopping.append(True))
+
     if not args.no_configure:
-        verify_and_configure(args.iface)
+        attempt = 0
+        while not stopping:
+            if (wait_for_iface(args.iface, stopping)
+                    and verify_and_configure(args.iface)):
+                break
+            attempt += 1
+            delay = min(60, 5 * attempt)
+            log("warn", f"adapter not usable, retrying in {delay}s "
+                        f"(attempt {attempt})")
+            time.sleep(delay)
+        if stopping:
+            return 0
 
     ident = Identity.load(args.key)
     node = Node(args.iface, ident, announce_interval=args.announce_interval,
@@ -208,16 +262,26 @@ def main():
     log("ok", f"announcing every {args.announce_interval/60:.0f} min, "
               f"hop limit {args.hop_limit}")
 
-    # Terminate cleanly so buffered route writes reach disk. A service that
-    # loses its last few seconds of learning on every restart is a service
-    # that never accumulates anything.
-    stopping = []
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, lambda *_: stopping.append(True))
-
     last_status = time.monotonic()
     while not stopping:
-        node.poll()
+        try:
+            node.poll()
+        except OSError as e:
+            # The adapter went away -- unplugged, USB reset, driver crash.
+            # A remote node cannot be replugged by hand, so wait it out.
+            log("err", f"radio error: {e}")
+            node.link.close()
+            while not stopping:
+                if (wait_for_iface(args.iface, stopping)
+                        and verify_and_configure(args.iface)):
+                    try:
+                        node.link = MonitorLink(args.iface)
+                        log("ok", "radio recovered")
+                        break
+                    except OSError as e2:
+                        log("err", f"reopen failed: {e2}")
+                time.sleep(5)
+            continue
         control.poll()
         if args.status_every and time.monotonic() - last_status >= args.status_every:
             report(node)

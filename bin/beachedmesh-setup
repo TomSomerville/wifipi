@@ -119,9 +119,14 @@ UNIT = """\
 [Unit]
 Description=beachedmesh node
 After=network.target
-# USB enumeration is not instant on a Pi, so the service may start before the
-# adapter appears. Restart= below covers that rather than a device dependency,
-# which would need the interface name baked into the unit name.
+
+# No start rate limit. systemd's default gives up permanently after 5 rapid
+# failures, which is exactly wrong for an unattended node: a solar site that
+# drained its battery and came back days later would find the service dead
+# with nobody present to restart it. The daemon waits for its adapter rather
+# than exiting, so repeated starts should not happen -- but if they do, giving
+# up is never the right answer here.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -144,6 +149,8 @@ StandardOutput=journal
 StandardError=journal
 
 [Install]
+# multi-user.target is reached during boot, before and independent of any
+# login. Nothing here depends on a session.
 WantedBy=multi-user.target
 """
 
