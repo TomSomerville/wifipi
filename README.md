@@ -132,6 +132,35 @@ the name, `hops=0` and a signal reading.
 
 Add `--hexdump` to the monitor to see raw packet bytes.
 
+## Known fault: transmit works, receive is dead
+
+Seen on both a Pi and a laptop, after moving the adapter between USB ports.
+The node keeps transmitting -- peers hear its announces -- but it receives
+nothing at all, not even ambient beacons from neighbouring access points.
+
+**A reboot does not fix it.** The USB port stays powered across a warm reboot,
+so the adapter comes back in the same state. Reloading the driver does:
+
+```bash
+sudo systemctl stop beachedmesh
+sudo modprobe -r mt7925u mt7925_common mt792x_lib mt76_usb mt76 2>/dev/null
+sleep 3
+sudo modprobe mt7925u
+sudo systemctl start beachedmesh
+```
+
+To confirm it is this fault rather than a configuration problem:
+
+```bash
+sudo tcpdump -i wlan1
+```
+
+On a working monitor-mode adapter this scrolls immediately with beacons from
+every access point in range. Total silence means the receive path is dead
+below anything in this repo -- check `iw dev wlan1 info` shows `type monitor`
+*and* a `channel` line first, since a radio tuned to nothing behaves the same
+way.
+
 ## Things to watch
 
 - **The rate field.** If received announces report 11 Mbps, the adapter
