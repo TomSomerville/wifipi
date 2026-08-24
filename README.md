@@ -19,6 +19,7 @@ verified announce. Encryption, data packets and path requests are not written.
 bin/beachedmesh            the service: announce, relay, learn routes
 bin/beachedmesh-setup      install: identity + service, safe to re-run
 bin/beachedmesh-routes     inspect what routes are known
+bin/beachedmesh-uninstall  remove the service, optionally the identity
 bin/beachedmesh-monitor    diagnostics: watch traffic, dump frames
 bin/beachedmesh-announce   send an announce on demand
 

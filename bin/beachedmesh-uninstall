@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Remove beachedmesh from this machine.
+
+    sudo ./bin/beachedmesh-uninstall            stop and remove the service
+    sudo ./bin/beachedmesh-uninstall --purge    also delete identity and routes
+    sudo ./bin/beachedmesh-uninstall --dry-run  show what would happen
+
+Stopping the service is safe and reversible. --purge deletes the private key,
+which means this node loses its address permanently: peers know it by a hash
+of that key, and a new one makes it a different node to everyone that has ever
+heard it. There is no recovery, so it is not the default.
+"""
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+
+STATE_DIR = "/var/lib/beachedmesh"
+KEY = f"{STATE_DIR}/node.key"
+UNIT_PATH = "/etc/systemd/system/beachedmesh.service"
+SOCKET = "/run/beachedmesh.sock"
+
+GRN, RED, YEL, DIM, RST = ("\033[32m", "\033[31m", "\033[33m",
+                           "\033[2m", "\033[0m")
+
+
+def ok(m):
+    print(f"{GRN}[ok]{RST}   {m}")
+
+
+def skip(m):
+    print(f"{DIM}[--]   {m}{RST}")
+
+
+def warn(m):
+    print(f"{YEL}[warn]{RST} {m}")
+
+
+def is_root():
+    return getattr(os, "geteuid", lambda: 0)() == 0
+
+
+def run(*cmd):
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--purge", action="store_true",
+                   help="also delete the identity and route database")
+    p.add_argument("--dry-run", action="store_true",
+                   help="show what would be removed, change nothing")
+    p.add_argument("--iface", help="also return this interface to managed mode")
+    args = p.parse_args()
+
+    if not is_root() and not args.dry_run:
+        print("must run as root", file=sys.stderr)
+        return 1
+
+    dry = args.dry_run
+    act = (lambda m: skip(f"would {m}")) if dry else None
+
+    # ---- service ----
+    if shutil.which("systemctl") and os.path.exists(UNIT_PATH):
+        if dry:
+            skip("would stop and disable beachedmesh.service")
+            skip(f"would remove {UNIT_PATH}")
+        else:
+            run("systemctl", "stop", "beachedmesh")
+            run("systemctl", "disable", "beachedmesh")
+            os.unlink(UNIT_PATH)
+            run("systemctl", "daemon-reload")
+            # Clears the failed/restart bookkeeping, so a later reinstall does
+            # not inherit this unit's history.
+            run("systemctl", "reset-failed", "beachedmesh")
+            ok("service stopped, disabled and removed")
+    else:
+        skip("no service installed")
+
+    # ---- runtime ----
+    if os.path.exists(SOCKET):
+        if dry:
+            skip(f"would remove {SOCKET}")
+        else:
+            os.unlink(SOCKET)
+            ok(f"removed {SOCKET}")
+
+    # ---- interface ----
+    # Monitor mode persists until something changes it, so a machine that has
+    # been uninstalled would otherwise keep a radio nobody is using and
+    # NetworkManager will not touch.
+    if args.iface:
+        if dry:
+            skip(f"would return {args.iface} to managed mode")
+        else:
+            run("ip", "link", "set", args.iface, "down")
+            run("iw", "dev", args.iface, "set", "type", "managed")
+            run("ip", "link", "set", args.iface, "up")
+            if shutil.which("nmcli"):
+                run("nmcli", "device", "set", args.iface, "managed", "yes")
+            ok(f"{args.iface} returned to managed mode")
+
+    # ---- state ----
+    if not args.purge:
+        if os.path.exists(STATE_DIR):
+            print()
+            warn(f"keeping {STATE_DIR} (identity and routes)")
+            print(f"       reinstalling keeps this node's address")
+            print(f"       --purge to delete it, which cannot be undone")
+        return 0
+
+    if not os.path.exists(STATE_DIR):
+        skip(f"no state at {STATE_DIR}")
+        return 0
+
+    if os.path.exists(KEY) and not dry:
+        # Print it before deleting: the only chance to record what is being
+        # thrown away, and peers will remember this address for a week.
+        try:
+            sys.path.insert(0, os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__))))
+            from beachedmesh.identity import Identity
+            warn(f"deleting identity {Identity.load(KEY).node_id.hex()}")
+        except Exception:
+            warn("deleting identity (could not read it)")
+
+    if dry:
+        skip(f"would delete {STATE_DIR} entirely")
+    else:
+        shutil.rmtree(STATE_DIR)
+        ok(f"deleted {STATE_DIR}")
+        print()
+        print("  this node will get a new address on reinstall, and peers "
+              "will\n  carry the old one until it ages out after 7 days")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
