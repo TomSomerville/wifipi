@@ -158,9 +158,8 @@ never actually reset. `--no-listen-check` turns the test off.
 
 **A reboot does not fix it by itself.** The USB port stays powered across a
 warm reboot, so the adapter comes back in the same state. Reloading the driver
-does, and
-`beachedmesh-laptopreset` does the whole sequence -- confirm the radio is deaf,
-reload, restart the service, confirm it hears again:
+does, and `beachedmesh-laptopreset` does the whole sequence by hand -- confirm
+the radio is deaf, reload, restart the service, confirm it hears again:
 
 ```bash
 sudo ./bin/beachedmesh-laptopreset -i wlan1
