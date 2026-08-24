@@ -22,6 +22,9 @@ KEY = f"{STATE_DIR}/node.key"
 UNIT_PATH = "/etc/systemd/system/beachedmesh.service"
 SOCKET = "/run/beachedmesh.sock"
 
+# Written by beachedmesh-setup to pin adapters to BCHD0, BCHD1 ... by MAC.
+UDEV_RULES = "/etc/udev/rules.d/70-beachedmesh-net.rules"
+
 GRN, RED, YEL, DIM, RST = ("\033[32m", "\033[31m", "\033[33m",
                            "\033[2m", "\033[0m")
 
@@ -98,6 +101,26 @@ def main():
         else:
             os.unlink(SOCKET)
             ok(f"removed {SOCKET}")
+
+    # ---- name pin ----
+    # Setup wrote this, so uninstall takes it away: a rule surviving the
+    # uninstall would keep renaming an adapter for a service that is gone,
+    # and the name would look like something the distro did. Removed whether
+    # or not --purge, since it is machine configuration rather than node
+    # identity -- reinstalling writes it again.
+    if os.path.exists(UDEV_RULES):
+        if dry:
+            skip(f"would remove {UDEV_RULES}")
+        else:
+            os.unlink(UDEV_RULES)
+            if shutil.which("udevadm"):
+                run("udevadm", "control", "--reload-rules")
+            ok(f"removed {UDEV_RULES}")
+            # The live interface keeps the name until something renames it;
+            # the kernel takes it back on the next boot.
+            print(f"{DIM}  adapters keep their BCHD names until reboot{RST}")
+    else:
+        skip("no interface name pin installed")
 
     # ---- interface ----
     # Monitor mode persists until something changes it, so a machine that has
