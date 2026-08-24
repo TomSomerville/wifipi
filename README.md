@@ -21,6 +21,7 @@ bin/beachedmesh-setup      install: identity + service, safe to re-run
 bin/beachedmesh-routes     inspect what routes are known
 bin/beachedmesh-uninstall  remove the service, optionally the identity
 bin/beachedmesh-monitor    diagnostics: watch traffic, dump frames
+bin/beachedmesh-laptopreset  fix an adapter that transmits but hears nothing
 bin/beachedmesh-announce   send an announce on demand
 
 beachedmesh/node.py        the loop -- composes everything below
@@ -139,7 +140,16 @@ The node keeps transmitting -- peers hear its announces -- but it receives
 nothing at all, not even ambient beacons from neighbouring access points.
 
 **A reboot does not fix it.** The USB port stays powered across a warm reboot,
-so the adapter comes back in the same state. Reloading the driver does:
+so the adapter comes back in the same state. Reloading the driver does, and
+`beachedmesh-laptopreset` does the whole sequence -- confirm the radio is deaf,
+reload, restart the service, confirm it hears again:
+
+```bash
+sudo ./bin/beachedmesh-laptopreset -i wlan1
+```
+
+It refuses to touch the driver if the radio is in fact receiving, so it is safe
+to reach for first. `--check` diagnoses without changing anything. By hand:
 
 ```bash
 sudo systemctl stop beachedmesh
