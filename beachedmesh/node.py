@@ -17,8 +17,7 @@ nothing observes the tables mid-update.
 import time
 
 from .flood import Flooder
-from .frame import (BadFrame, DEFAULT_HOP_LIMIT, Packet, TYPE_ANNOUNCE,
-                    _TYPE_NAMES)
+from .frame import BadFrame, DEFAULT_HOP_LIMIT, Packet, TYPE_ANNOUNCE
 from .identity import BadAnnounce, parse_announce
 from .link import MonitorLink
 from .routes import ANNOUNCE_INTERVAL, RouteTable

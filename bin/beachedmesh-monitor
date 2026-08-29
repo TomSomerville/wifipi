@@ -18,123 +18,20 @@ air is discarded.
 import argparse
 import os
 import struct
-import subprocess
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from beachedmesh import adapter                                       # noqa: E402
+from beachedmesh.cli import (DIM, GRN, RST, YEL, die, is_root,        # noqa: E402
+                             mac_str, ok, say, warn)
 from beachedmesh.frame import (BadFrame, DEFAULT_HOP_LIMIT, HEADER_LEN,  # noqa: E402
                                Packet, TYPE_ANNOUNCE, _TYPE_NAMES)
 from beachedmesh.identity import (ANNOUNCE_MIN, BadAnnounce,          # noqa: E402
                                   Identity, parse_announce)
-from beachedmesh.link import BSSID, CHANNEL, MonitorLink              # noqa: E402
+from beachedmesh.link import BSSID, MonitorLink                       # noqa: E402
 from beachedmesh.routes import RouteTable                             # noqa: E402
-
-GRN, RED, YEL, DIM, RST = ("\033[32m", "\033[31m", "\033[33m",
-                           "\033[2m", "\033[0m")
-
-DRIVER_HINT = "mt7925u"
-
-
-def is_root():
-    # geteuid is absent on Windows; these tools are Linux-only, but
-    # keeping the check portable lets the logic be exercised anywhere.
-    return getattr(os, "geteuid", lambda: 0)() == 0
-
-
-def ok(m):
-    print(f"{GRN}[ok]{RST}   {m}")
-
-
-def bad(m):
-    print(f"{RED}[fail]{RST} {m}")
-
-
-def warn(m):
-    print(f"{YEL}[warn]{RST} {m}")
-
-
-def run(*cmd):
-    return subprocess.run(cmd, capture_output=True, text=True)
-
-
-def die(msg):
-    bad(msg)
-    sys.exit(1)
-
-
-def mac_str(b):
-    return ":".join(f"{x:02x}" for x in b)
-
-
-# ---------------------------------------------------------------- verify --
-
-def verify_hardware(iface):
-    """The interface is a USB wifi adapter, not the Pi's onboard radio."""
-    if not os.path.exists(f"/sys/class/net/{iface}"):
-        die(f"no such interface: {iface}\n"
-            f"       attached?  lsusb\n"
-            f"       driver?    dmesg | tail -40")
-    if not os.path.exists(f"/sys/class/net/{iface}/phy80211"):
-        die(f"{iface} is not a wireless interface")
-
-    dev = os.path.realpath(f"/sys/class/net/{iface}/device")
-    if "usb" not in dev:
-        die(f"{iface} is not USB-attached -- that looks like the onboard "
-            f"radio, whose MAC runs in firmware and cannot inject")
-
-    drv = os.path.basename(
-        os.path.realpath(f"/sys/class/net/{iface}/device/driver"))
-    ok(f"{iface}: {drv} over USB")
-    if drv != DRIVER_HINT:
-        warn(f"expected {DRIVER_HINT}; {drv} may still work if it is mac80211")
-    return drv
-
-
-def verify_monitor_supported(iface, drv):
-    """The driver advertises monitor mode among its interface types."""
-    r = run("iw", "phy")
-    if "monitor" not in r.stdout:
-        die(f"driver {drv} does not list monitor in its supported modes")
-    ok(f"driver {drv} advertises monitor mode")
-
-
-def iface_type(iface):
-    r = run("iw", "dev", iface, "info")
-    for line in r.stdout.splitlines():
-        line = line.strip()
-        if line.startswith("type "):
-            return line.split()[1]
-    return "unknown"
-
-
-def enter_monitor(iface):
-    """Engage monitor mode on our channel and leave it there."""
-    # NetworkManager and wpa_supplicant drag the interface back into managed
-    # mode if they are still watching it.
-    if run("sh", "-c", "command -v nmcli").returncode == 0:
-        run("nmcli", "device", "set", iface, "managed", "no")
-    run("pkill", "-f", f"wpa_supplicant.*{iface}")
-
-    if iface_type(iface) != "monitor":
-        run("ip", "link", "set", iface, "down")
-        # 'otherbss' asks for frames from every BSS, not just one.
-        r = run("iw", "dev", iface, "set", "monitor", "otherbss")
-        if r.returncode != 0:
-            r = run("iw", "dev", iface, "set", "type", "monitor")
-        if r.returncode != 0:
-            die(f"{iface} will not enter monitor mode: {r.stderr.strip()}")
-
-    run("ip", "link", "set", iface, "up")
-    if iface_type(iface) != "monitor":
-        die(f"{iface} is type '{iface_type(iface)}', not monitor")
-
-    r = run("iw", "dev", iface, "set", "channel", str(CHANNEL))
-    if r.returncode != 0:
-        warn(f"could not set channel {CHANNEL}: {r.stderr.strip()} "
-             f"(check your regulatory domain)")
-    ok(f"{iface} in monitor mode on channel {CHANNEL}")
 
 
 def verify_injection(link, count=5):
@@ -283,6 +180,7 @@ def monitor(link, brief, own_id=None):
                     sign_pub=info["sign_pub"], encrypt_pub=info["encrypt_pub"],
                     name=name)
                 tag = {"new": f"{GRN}NEW{RST}", "better": f"{GRN}BETTER{RST}",
+                       "settling": f"{YEL}SETTLING{RST}",
                        "self": f"{DIM}SELF{RST}"}.get(what, "      ")
                 print(f"[{ts}] ANNOUNCE {tag:<6} {info['node_id'].hex()}  "
                       f"{sig} {rate_s}  hops={hops}  name={name or '-'}")
@@ -321,9 +219,8 @@ def main():
         return 1
 
     if not args.no_verify:
-        drv = verify_hardware(args.iface)
-        verify_monitor_supported(args.iface, drv)
-        enter_monitor(args.iface)
+        if not adapter.verify_and_configure(args.iface, say):
+            return 1
 
     try:
         link = MonitorLink(args.iface)

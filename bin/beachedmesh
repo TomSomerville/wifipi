@@ -14,50 +14,26 @@ beachedmesh-announce does -- gives each half a picture.
 import argparse
 import os
 import signal
-import subprocess
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from beachedmesh.control import ControlServer, DEFAULT_SOCKET   # noqa: E402
+from beachedmesh import adapter, recover                         # noqa: E402
+from beachedmesh.cli import is_root, log                         # noqa: E402
+from beachedmesh.control import ControlServer, DEFAULT_SOCKET    # noqa: E402
 from beachedmesh.frame import DEFAULT_HOP_LIMIT                  # noqa: E402
 from beachedmesh.identity import Identity                        # noqa: E402
-from beachedmesh.link import BSSID, CHANNEL, MonitorLink         # noqa: E402
+from beachedmesh.link import MonitorLink                         # noqa: E402
 from beachedmesh.node import Node                                # noqa: E402
-from beachedmesh import recover                                  # noqa: E402
 from beachedmesh.routes import ANNOUNCE_INTERVAL, DEFAULT_DB     # noqa: E402
 
 DEFAULT_KEY = "/var/lib/beachedmesh/node.key"
-DRIVER_HINT = "mt7925u"
-
-GRN, RED, YEL, DIM, RST = ("\033[32m", "\033[31m", "\033[33m",
-                           "\033[2m", "\033[0m")
-
-
-def is_root():
-    return getattr(os, "geteuid", lambda: 0)() == 0
-
-
-def run(*cmd):
-    return subprocess.run(cmd, capture_output=True, text=True)
-
-
-def log(level, msg):
-    # Plain lines with a timestamp: journald adds its own metadata, and a
-    # service that formats for a terminal is unreadable in a log file.
-    ts = time.strftime("%H:%M:%S")
-    colour = {"ok": GRN, "warn": YEL, "err": RED}.get(level, "")
-    print(f"[{ts}] {colour}{level:<4}{RST} {msg}", flush=True)
 
 
 def die(msg):
     log("err", msg)
     sys.exit(1)
-
-
-def mac_str(b):
-    return ":".join(f"{x:02x}" for x in b)
 
 
 # ---------------------------------------------------------------- adapter --
@@ -86,63 +62,6 @@ def wait_for_iface(iface, stopping):
         if waited % 60 == 0:
             log("warn", f"still waiting for {iface} ({waited // 60} min)")
     return False
-
-
-def verify_and_configure(iface):
-    """Confirm the adapter can do this, then leave it in monitor mode.
-
-    Returns False if the adapter is present but unusable, so the caller can
-    wait and retry rather than exiting -- the adapter may be replaced, or the
-    driver may still be settling.
-    """
-    if not os.path.exists(f"/sys/class/net/{iface}/phy80211"):
-        log("err", f"{iface} is not a wireless interface")
-        return False
-
-    dev = os.path.realpath(f"/sys/class/net/{iface}/device")
-    if "usb" not in dev:
-        log("err", f"{iface} is not USB-attached -- that looks like the "
-                   f"onboard radio, whose MAC runs in firmware and cannot "
-                   f"inject")
-        return False
-
-    drv = os.path.basename(
-        os.path.realpath(f"/sys/class/net/{iface}/device/driver"))
-    log("ok", f"{iface}: {drv} over USB")
-    if drv != DRIVER_HINT:
-        log("warn", f"expected {DRIVER_HINT}; {drv} may work if it is mac80211")
-
-    if "monitor" not in run("iw", "phy").stdout:
-        log("err", f"driver {drv} does not list monitor in its supported modes")
-        return False
-
-    # NetworkManager and wpa_supplicant drag the interface back to managed.
-    if run("sh", "-c", "command -v nmcli").returncode == 0:
-        run("nmcli", "device", "set", iface, "managed", "no")
-    run("pkill", "-f", f"wpa_supplicant.*{iface}")
-
-    if iface_type(iface) != "monitor":
-        run("ip", "link", "set", iface, "down")
-        r = run("iw", "dev", iface, "set", "monitor", "otherbss")
-        if r.returncode != 0:
-            r = run("iw", "dev", iface, "set", "type", "monitor")
-        if r.returncode != 0:
-            log("err", f"{iface} will not enter monitor mode: "
-                       f"{r.stderr.strip()}")
-            return False
-
-    run("ip", "link", "set", iface, "up")
-    if iface_type(iface) != "monitor":
-        log("err", f"{iface} is type '{iface_type(iface)}', not monitor")
-        return False
-
-    r = run("iw", "dev", iface, "set", "channel", str(CHANNEL))
-    if r.returncode != 0:
-        log("warn", f"could not set channel {CHANNEL}: {r.stderr.strip()}")
-
-    log("ok", f"{iface} in monitor mode on channel {CHANNEL}, "
-              f"bssid {mac_str(BSSID)}")
-    return True
 
 
 # How many times to reload the driver for a deaf radio before giving up and
@@ -184,14 +103,6 @@ def recover_deaf_radio(iface, attempt):
     return True
 
 
-def iface_type(iface):
-    for line in run("iw", "dev", iface, "info").stdout.splitlines():
-        line = line.strip()
-        if line.startswith("type "):
-            return line.split()[1]
-    return "unknown"
-
-
 # ----------------------------------------------------------------- events --
 
 def make_handlers(node, verbose):
@@ -203,7 +114,7 @@ def make_handlers(node, verbose):
         hops = max(0, node.hop_limit - pkt.hop_limit)
         who = pkt.src.hex()
         name = (info["app_data"].decode(errors="replace") if info else "") or "-"
-        if route in ("new", "better"):
+        if route in ("new", "better", "settling"):
             log("ok", f"{route.upper():<9} {who}  {sig}  hops={hops}  "
                       f"name={name}")
         elif verbose:
@@ -276,7 +187,7 @@ def main():
         reloads = 0
         while not stopping:
             if (wait_for_iface(args.iface, stopping)
-                    and verify_and_configure(args.iface)):
+                    and adapter.verify_and_configure(args.iface, log)):
                 # Everything above says the adapter is fine. Only now is the
                 # deaf-radio fault distinguishable from a healthy node, and
                 # only by listening.
@@ -328,7 +239,7 @@ def main():
             node.link.close()
             while not stopping:
                 if (wait_for_iface(args.iface, stopping)
-                        and verify_and_configure(args.iface)):
+                        and adapter.verify_and_configure(args.iface, log)):
                     try:
                         node.link = MonitorLink(args.iface)
                         log("ok", "radio recovered")

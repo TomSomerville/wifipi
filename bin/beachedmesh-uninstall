@@ -14,8 +14,11 @@ heard it. There is no recovery, so it is not the default.
 import argparse
 import os
 import shutil
-import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from beachedmesh.cli import DIM, RST, is_root, ok, run, skip, warn  # noqa: E402
 
 STATE_DIR = "/var/lib/beachedmesh"
 KEY = f"{STATE_DIR}/node.key"
@@ -24,29 +27,6 @@ SOCKET = "/run/beachedmesh.sock"
 
 # Written by beachedmesh-setup to pin adapters to BCHD0, BCHD1 ... by MAC.
 UDEV_RULES = "/etc/udev/rules.d/70-beachedmesh-net.rules"
-
-GRN, RED, YEL, DIM, RST = ("\033[32m", "\033[31m", "\033[33m",
-                           "\033[2m", "\033[0m")
-
-
-def ok(m):
-    print(f"{GRN}[ok]{RST}   {m}")
-
-
-def skip(m):
-    print(f"{DIM}[--]   {m}{RST}")
-
-
-def warn(m):
-    print(f"{YEL}[warn]{RST} {m}")
-
-
-def is_root():
-    return getattr(os, "geteuid", lambda: 0)() == 0
-
-
-def run(*cmd):
-    return subprocess.run(cmd, capture_output=True, text=True)
 
 
 def report_checkout():
@@ -156,8 +136,6 @@ def main():
         # Print it before deleting: the only chance to record what is being
         # thrown away, and peers will remember this address for a week.
         try:
-            sys.path.insert(0, os.path.dirname(
-                os.path.dirname(os.path.abspath(__file__))))
             from beachedmesh.identity import Identity
             warn(f"deleting identity {Identity.load(KEY).node_id.hex()}")
         except Exception:

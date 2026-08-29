@@ -17,38 +17,19 @@ Run beachedmesh-monitor on another node to see it arrive and verify.
 
 import argparse
 import os
-import subprocess
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from beachedmesh.adapter import iface_info           # noqa: E402
+from beachedmesh.cli import is_root                  # noqa: E402
 from beachedmesh.control import DEFAULT_SOCKET, query  # noqa: E402
 from beachedmesh.frame import Packet, TYPE_ANNOUNCE    # noqa: E402
 from beachedmesh.identity import Identity            # noqa: E402
 from beachedmesh.link import CHANNEL, MonitorLink    # noqa: E402
 
 DEFAULT_KEY = "/var/lib/beachedmesh/node.key"
-
-
-def is_root():
-    # geteuid is absent on Windows; these tools are Linux-only, but
-    # keeping the check portable lets the logic be exercised anywhere.
-    return getattr(os, "geteuid", lambda: 0)() == 0
-
-
-def iface_state(iface):
-    """(type, channel) as the driver reports them."""
-    r = subprocess.run(["iw", "dev", iface, "info"],
-                       capture_output=True, text=True)
-    itype, chan = "unknown", None
-    for line in r.stdout.splitlines():
-        line = line.strip()
-        if line.startswith("type "):
-            itype = line.split()[1]
-        elif line.startswith("channel "):
-            chan = int(line.split()[1])
-    return itype, chan
 
 
 def require_monitor(iface):
@@ -58,7 +39,7 @@ def require_monitor(iface):
     accepts the frame -- while nothing usable reaches the air. Nothing here
     configures the interface; run beachedmesh-monitor to do that.
     """
-    itype, chan = iface_state(iface)
+    itype, chan = iface_info(iface)
     if itype != "monitor":
         print(f"{iface} is type '{itype}', not monitor -- frames would go nowhere.",
               file=sys.stderr)

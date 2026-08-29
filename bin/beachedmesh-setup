@@ -17,11 +17,12 @@ import argparse
 import os
 import shutil
 import stat
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from beachedmesh import adapter                      # noqa: E402
+from beachedmesh.cli import die, is_root, ok, run, warn  # noqa: E402
 from beachedmesh.identity import Identity            # noqa: E402
 from beachedmesh.routes import ANNOUNCE_INTERVAL     # noqa: E402
 
@@ -33,30 +34,6 @@ DEFAULT_KEY = f"{STATE_DIR}/node.key"
 UNIT_PATH = "/etc/systemd/system/beachedmesh.service"
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-GRN, RED, YEL, DIM, RST = ("\033[32m", "\033[31m", "\033[33m",
-                           "\033[2m", "\033[0m")
-
-
-def ok(m):
-    print(f"{GRN}[ok]{RST}   {m}")
-
-
-def warn(m):
-    print(f"{YEL}[warn]{RST} {m}")
-
-
-def die(m):
-    print(f"{RED}[fail]{RST} {m}", file=sys.stderr)
-    sys.exit(1)
-
-
-def is_root():
-    return getattr(os, "geteuid", lambda: 0)() == 0
-
-
-def run(*cmd):
-    return subprocess.run(cmd, capture_output=True, text=True)
 
 
 # ---------------------------------------------------------- prerequisites --
@@ -78,16 +55,7 @@ def check_iface(iface):
     if not os.path.exists(f"/sys/class/net/{iface}"):
         warn(f"{iface} does not exist yet -- the service will fail until it does")
         return
-    if not os.path.exists(f"/sys/class/net/{iface}/phy80211"):
-        warn(f"{iface} is not a wireless interface")
-        return
-    dev = os.path.realpath(f"/sys/class/net/{iface}/device")
-    if "usb" not in dev:
-        warn(f"{iface} is not USB-attached -- the onboard radio cannot inject")
-        return
-    drv = os.path.basename(os.path.realpath(
-        f"/sys/class/net/{iface}/device/driver"))
-    ok(f"{iface}: {drv} over USB")
+    adapter.verify(iface, lambda level, m: (ok if level == "ok" else warn)(m))
 
 
 # ----------------------------------------------------------------- rename --
@@ -330,6 +298,8 @@ def main():
                    help="identity only, do not touch systemd")
     p.add_argument("--force-keys", action="store_true",
                    help="replace the identity, changing this node's address")
+    p.add_argument("--no-rename", action="store_true",
+                   help="leave the adapter under its kernel name")
     args = p.parse_args()
 
     if not is_root():
@@ -349,11 +319,12 @@ def main():
               f"  sudo {REPO}/bin/beachedmesh -i <iface>")
         return 0
 
+    iface = rename_iface(args.iface, args.no_rename)
     started = install_service(iface, args.name, args.interval)
 
     print()
     ok(f"node {ident.node_id.hex()}" + (f" ({args.name})" if args.name else ""))
-    print(f"\n  announcing every {args.interval/60:.0f} min on {args.iface}")
+    print(f"\n  announcing every {args.interval/60:.0f} min on {iface}")
     if started:
         print(f"\n  logs     journalctl -u beachedmesh -f")
         print(f"  routes   {REPO}/bin/beachedmesh-routes")

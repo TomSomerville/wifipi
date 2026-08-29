@@ -111,7 +111,7 @@ class Identity:
     def build_announce(self, app_data: bytes = b"") -> bytes:
         """Payload for a TYPE_ANNOUNCE packet sent with src = self.node_id."""
         random = os.urandom(RANDOM_LEN)
-        signed = self._announce_signed_bytes(
+        signed = _announce_signed_bytes(
             self.node_id, self.sign_pub, self.encrypt_pub, random, app_data)
         sig = self.sign(signed)
         return self.sign_pub + self.encrypt_pub + random + sig + app_data
@@ -124,9 +124,6 @@ def _announce_signed_bytes(src, sign_pub, encrypt_pub, random, app_data):
     # src is included so a valid announce cannot be lifted onto another
     # address, and app_data so it cannot be tampered with in flight.
     return src + sign_pub + encrypt_pub + random + app_data
-
-
-Identity._announce_signed_bytes = staticmethod(_announce_signed_bytes)
 
 
 def parse_announce(src: bytes, payload: bytes) -> dict:

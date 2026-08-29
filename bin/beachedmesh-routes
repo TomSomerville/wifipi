@@ -22,20 +22,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from beachedmesh.cli import DIM, RST                    # noqa: E402
 from beachedmesh.control import DEFAULT_SOCKET, query   # noqa: E402
-from beachedmesh.routes import DEFAULT_DB               # noqa: E402
-
-DIM, RST = "\033[2m", "\033[0m"
-
-
-def age_str(seconds):
-    if seconds < 90:
-        return f"{seconds:.0f}s"
-    if seconds < 5400:
-        return f"{seconds / 60:.0f}m"
-    if seconds < 172800:
-        return f"{seconds / 3600:.0f}h"
-    return f"{seconds / 86400:.1f}d"
+from beachedmesh.routes import DEFAULT_DB, age_str      # noqa: E402
 
 
 def mac(b):

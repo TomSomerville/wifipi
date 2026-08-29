@@ -24,13 +24,15 @@ trusting the service to report its own health.
 import argparse
 import os
 import shutil
-import subprocess
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from beachedmesh import recover                    # noqa: E402
+from beachedmesh.adapter import iface_info         # noqa: E402
+from beachedmesh.cli import (DIM, RST, err, is_root, note, ok,  # noqa: E402
+                             run, say, skip, warn)
 
 # The listening and the driver reload are shared with the service, which does
 # the same check on startup -- one definition of "deaf" for both, so a node
@@ -41,54 +43,7 @@ SNIFF_SECONDS = recover.LISTEN_SECONDS
 # it has done that would fail for the wrong reason.
 SERVICE_SETTLE = 3.0
 
-GRN, RED, YEL, DIM, RST = ("\033[32m", "\033[31m", "\033[33m",
-                           "\033[2m", "\033[0m")
-
 UNIT_PATH = "/etc/systemd/system/beachedmesh.service"
-
-
-def ok(m):
-    print(f"{GRN}[ok]{RST}   {m}")
-
-
-def skip(m):
-    print(f"{DIM}[--]   {m}{RST}")
-
-
-def warn(m):
-    print(f"{YEL}[warn]{RST} {m}")
-
-
-def err(m):
-    print(f"{RED}[err]{RST}  {m}")
-
-
-def note(m):
-    print(f"{DIM}       {m}{RST}")
-
-
-def is_root():
-    return getattr(os, "geteuid", lambda: 0)() == 0
-
-
-def run(*cmd):
-    return subprocess.run(cmd, capture_output=True, text=True)
-
-
-def exists(iface):
-    return os.path.exists(f"/sys/class/net/{iface}")
-
-
-def iface_info(iface):
-    """(type, channel) as iw reports them. Either may be None."""
-    itype = chan = None
-    for line in run("iw", "dev", iface, "info").stdout.splitlines():
-        line = line.strip()
-        if line.startswith("type "):
-            itype = line.split(None, 1)[1]
-        elif line.startswith("channel "):
-            chan = line.split(None, 1)[1]
-    return itype, chan
 
 
 def sniff(iface, seconds):
@@ -105,9 +60,6 @@ def service_installed():
 
 def reload_driver():
     """Unload the whole stack, then load the top of it back."""
-    def say(level, msg):
-        {"ok": ok, "warn": warn, "err": err}.get(level, note)(msg)
-
     if not recover.reload_driver(say):
         note("if a module is still in use, stop NetworkManager or "
              "wpa_supplicant and run this again")
@@ -139,7 +91,7 @@ def main():
         return 1
 
     # ---- diagnose ----
-    if not exists(iface):
+    if not os.path.exists(f"/sys/class/net/{iface}"):
         err(f"{iface} does not exist -- the adapter is not enumerated at all")
         note("check lsusb and dmesg; reloading will not conjure it back")
         return 1
