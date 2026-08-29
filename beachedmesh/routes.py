@@ -32,11 +32,9 @@ record, never needed to forward a packet, and needed exactly when you first
 talk to a node -- which is when you are already paying for a disk read.
 """
 
-import json
 import os
 import sqlite3
 import struct
-import tempfile
 import time
 
 # The announce interval everything else is sized against. Long, deliberately:
@@ -50,12 +48,24 @@ ANNOUNCE_INTERVAL = 6 * 3600.0
 # announce interval to relearn.
 DEFAULT_TTL = 7 * 24 * 3600.0
 
-# How long a *path* is trusted, which is a much shorter question than how long
-# a *node* is remembered. Past this, any working route displaces the one we
-# hold: a short path through a neighbour that stopped answering is worse than
-# a longer one that works. Three announce intervals rides out two lost
-# announces without thrashing between paths.
-STALE_AFTER = 3 * ANNOUNCE_INTERVAL
+# A route records the *latest* announce heard, not the best ever heard. Each
+# announce floods, so copies of one announce arrive via different neighbours
+# within moments of each other, and the lowest-hop copy says where the node
+# is right now. A copy *worse* than the held route therefore waits this long
+# for a lower-hop sibling before it replaces the route anyway: if none
+# arrives, the node has moved, and the newest announce is right however many
+# hops it took. Relay contention adds at most ~0.25 s per hop
+# (flood.DELAY_BANDS), so a second covers siblings several hops apart -- and
+# the wait costs nothing, because traffic keeps using the held route while a
+# candidate settles.
+SETTLE_AFTER = 1.0
+
+# Copies of one flood can straggle in after their announce has already
+# updated the route; without a guard, a worse straggler would start a new
+# settle and displace the better route just written. A route touched within
+# this window therefore ignores worse copies and equal-hop neighbour swaps.
+# Well above any straggler, far below any sane announce interval.
+FLOOD_GUARD = 3.0
 
 # Memory budget for the hot table. A dict entry holding a 16-byte key and a
 # packed 13-byte value measures ~52 bytes -- Python's per-entry overhead
@@ -79,6 +89,16 @@ FLUSH_SECONDS = 5.0
 FLUSH_ENTRIES = 10_000
 
 DEFAULT_DB = "/var/lib/beachedmesh/routes.db"
+
+
+def age_str(seconds):
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f}m"
+    if seconds < 172800:
+        return f"{seconds / 3600:.0f}h"
+    return f"{seconds / 86400:.1f}d"
 
 
 class Route:
@@ -110,14 +130,7 @@ class Route:
         return time.time() - self.last_seen
 
     def age_str(self):
-        a = self.age()
-        if a < 90:
-            return f"{a:.0f}s"
-        if a < 5400:
-            return f"{a / 60:.0f}m"
-        if a < 172800:
-            return f"{a / 3600:.0f}h"
-        return f"{a / 86400:.1f}d"
+        return age_str(self.age())
 
     def __repr__(self):
         via = ":".join(f"{b:02x}" for b in self.next_hop)
@@ -265,6 +278,11 @@ class RouteTable:
         # node_id -> packed(next_hop, hops, rssi, last_seen). Ordered so the
         # least recently used entry is the one evicted.
         self._hot = {}
+        # node_id -> (commit_at, next_hop, hops, rssi): a worse-than-held
+        # route waiting out SETTLE_AFTER for a lower-hop copy of its flood.
+        # Tiny and short-lived -- an entry exists only between the first
+        # worse copy of an announce and its commit a second later.
+        self._pending = {}
         self.stats = {"hot_hits": 0, "cold_hits": 0, "misses": 0,
                       "evictions": 0}
 
@@ -274,42 +292,83 @@ class RouteTable:
               encrypt_pub=None, name=""):
         """Record what an announce taught us.
 
-        Returns "self", "new", "better", "refreshed" or "kept".
+        Returns "self", "new", "better", "refreshed", "settling" or "kept".
         """
         if self.own_id is not None and node_id == self.own_id:
             return "self"        # our own announce, relayed back to us
 
         now = time.time()
         existing = self._hot.get(node_id)
-        verdict = "new"
 
-        if existing is not None:
-            old_hop, old_hops, old_rssi, old_seen = struct.unpack(
-                ROUTE_FMT, existing)
-            if next_hop == old_hop:
-                verdict = "refreshed"
-            else:
-                # A different neighbour is offering a path. Take it if it is
-                # shorter, or equally short but stronger, or if what we hold
-                # has gone stale -- a short route through a neighbour that
-                # stopped answering is worse than a longer one that works.
-                better = (hops < old_hops
-                          or (hops == old_hops and rssi is not None
-                              and rssi > old_rssi)
-                          or (now - old_seen) > STALE_AFTER)
-                if not better:
-                    # Still worth recording that we heard it.
-                    if self.cold:
-                        self.cold.buffer(node_id, old_hop, old_hops, old_rssi,
-                                         now, sign_pub, encrypt_pub, name)
-                    return "kept"
+        if existing is None:
+            self._pending.pop(node_id, None)
+            self._commit(node_id, next_hop, hops, rssi, now,
+                         sign_pub, encrypt_pub, name)
+            return "new"
+
+        old_hop, old_hops, old_rssi, old_seen = struct.unpack(
+            ROUTE_FMT, existing)
+
+        if hops <= old_hops:
+            # At or below the held hop count: the held distance still
+            # stands, so any worse candidate waiting to settle is wrong.
+            self._pending.pop(node_id, None)
+            if hops < old_hops:
                 verdict = "better"
+            elif next_hop == old_hop:
+                verdict = "refreshed"
+            elif (now - old_seen) <= FLOOD_GUARD and not (
+                    rssi is not None and rssi > old_rssi):
+                # An equal-hop sibling of the copy that just refreshed the
+                # route, and no stronger. Note the hearing, keep the route.
+                if self.cold:
+                    self.cold.buffer(node_id, old_hop, old_hops, old_rssi,
+                                     now, sign_pub, encrypt_pub, name)
+                return "kept"
+            else:
+                # Equally short via a different neighbour: stronger, or the
+                # newest announce no longer arrives via the held one.
+                verdict = "better"
+            self._commit(node_id, next_hop, hops, rssi, now,
+                         sign_pub, encrypt_pub, name)
+            return verdict
 
+        # Worse than held. A straggling copy of the flood that just updated
+        # this route proves nothing; otherwise it is the newest word on the
+        # node, so start (or sharpen) a settle -- if no lower-hop copy lands
+        # before the deadline, tick() commits it and the old entry is gone.
+        if (now - old_seen) > FLOOD_GUARD:
+            p = self._pending.get(node_id)
+            if (p is None or hops < p[2]
+                    or (hops == p[2] and rssi is not None and rssi > p[3])):
+                commit_at = now + SETTLE_AFTER if p is None else p[0]
+                self._pending[node_id] = (commit_at, next_hop, hops,
+                                          -128 if rssi is None else int(rssi))
+            verdict = "settling"
+        else:
+            verdict = "kept"
+        # Either way the node was heard -- that is what the 7-day TTL counts.
+        if self.cold:
+            self.cold.buffer(node_id, old_hop, old_hops, old_rssi, now,
+                             sign_pub, encrypt_pub, name)
+        return verdict
+
+    def _commit(self, node_id, next_hop, hops, rssi, now,
+                sign_pub=None, encrypt_pub=None, name=""):
         self._put_hot(node_id, next_hop, hops, rssi, now)
         if self.cold:
             self.cold.buffer(node_id, next_hop, hops, rssi, now,
                              sign_pub, encrypt_pub, name)
-        return verdict
+
+    def _settle(self):
+        """Commit pending routes whose wait for a lower-hop copy is over."""
+        if not self._pending:
+            return
+        now = time.time()
+        due = [nid for nid, p in self._pending.items() if p[0] <= now]
+        for nid in due:
+            _, next_hop, hops, rssi = self._pending.pop(nid)
+            self._commit(nid, next_hop, hops, rssi, now)
 
     def _put_hot(self, node_id, next_hop, hops, rssi, last_seen):
         # Delete first so reinserting moves it to the end: dicts keep
@@ -385,7 +444,8 @@ class RouteTable:
     # ---- maintenance ----
 
     def tick(self):
-        """Call each loop turn. Flushes buffered writes when due."""
+        """Call each loop turn. Settles due route changes, flushes writes."""
+        self._settle()
         return self.cold.maybe_flush() if self.cold else 0
 
     def expire(self):
